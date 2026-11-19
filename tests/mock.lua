@@ -70,6 +70,9 @@ function Widget:SetJustifyH() end
 function Widget:SetAllPoints() end
 function Widget:SetColorTexture(r, g, b, a) self.color = { r, g, b, a } end
 function Widget:SetTexture(t) self.texture = t end
+function Widget:SetTexCoord() end
+function Widget:SetVertexColor(r, g, b) self.vertexColor = { r, g, b } end
+function Widget:RegisterForClicks() end
 function Widget:SetFont(f, size, flags) self.font = { f, size, flags } end
 function Widget:SetTextColor(r, g, b) self.textColor = { r, g, b } end
 function Widget:SetText(t) self.text = t end
@@ -110,6 +113,17 @@ _G.GetBuildInfo = function() return "1.60.1", "99999", "Jan 1 2026", 16001 end
 
 _G.UnitName = function(unit) return "TestPlayer" end
 _G.UnitGUID = function(unit) return "Player-1234-ABCDEF01" end
+
+-- Real Blizzard global string values (English), which Loot.lua and Money.lua turn into
+-- Lua patterns at load time - without these defined, those pattern lists end up empty
+-- and nothing would ever match, silently.
+_G.LOOT_ITEM_SELF = "You receive loot: %s."
+_G.LOOT_ITEM_SELF_MULTIPLE = "You receive loot: %sx%d."
+_G.LOOT_ITEM_PUSHED_SELF = "You receive item: %s."
+_G.LOOT_ITEM_PUSHED_SELF_MULTIPLE = "You receive item: %sx%d."
+_G.GOLD_AMOUNT = "%d Gold"
+_G.SILVER_AMOUNT = "%d Silver"
+_G.COPPER_AMOUNT = "%d Copper"
 
 _G.GetItemInfo = function(itemID)
     return "Test Item " .. tostring(itemID), "itemlink", 2, 1, 1, "Misc", "Junk", 1, "", 134400, 12, 0, 0, 1, 0, 0, false
@@ -248,42 +262,44 @@ end
 __FlushLayout()
 print("/coffer debug OK -- debug window shown: " .. tostring(_G.CofferDebugFrame and _G.CofferDebugFrame:IsShown()))
 
--- Simulate looting an item (CHAT_MSG_LOOT) as the player
-fakeMoney = fakeMoney + 1234
-FireEvent("PLAYER_MONEY")
-FireEvent("CHAT_MSG_LOOT", "You receive loot: |cffffffff|Hitem:2589::::::::1:0:0:0:0|h[Linen Cloth]|h|rx3.", "TestPlayer")
-assertEqual("own loot item count tracked", Coffer.db.session.items[2589] and Coffer.db.session.items[2589].count, 3)
-assertEqual("own loot money bucket (loot)", Coffer.db.session.loot, 1234)
+-- Simulate looting an item (CHAT_MSG_LOOT) as the player. Ownership is now determined
+-- purely by matching the message against Blizzard's own "You receive loot/item: ..."
+-- templates (see Loot.lua) - no sender name or GUID involved at all, which is why the
+-- two-part-name-mismatch/GUID scenarios tested here previously no longer apply: the
+-- player's own loot is ALWAYS phrased as "You receive...", regardless of what their
+-- name actually is, so that whole problem class can't recur with this approach.
+FireEvent("CHAT_MSG_LOOT", "You receive loot: |cffffffff|Hitem:2589::::::::1:0:0:0:0|h[Linen Cloth]|h|rx3.")
+assertEqual("own loot item count tracked (multiple)", Coffer.db.session.items[2589] and Coffer.db.session.items[2589].count, 3)
 
--- Simulate someone else's loot in the same channel (must NOT be counted - this is the
--- party-loot bug found from the user's real chat log)
-FireEvent("CHAT_MSG_LOOT", "SomeoneElse receives loot: |cffffffff|Hitem:2592::::::::1:0:0:0:0|h[Wool Cloth]|h|r.", "SomeoneElse")
+-- The singular ("x1" implicit) and "pushed" (e.g. quest reward item) templates too.
+FireEvent("CHAT_MSG_LOOT", "You receive loot: |cffffffff|Hitem:2590::::::::1:0:0:0:0|h[Single Item]|h|r.")
+assertEqual("own loot item count tracked (singular, implicit x1)", Coffer.db.session.items[2590] and Coffer.db.session.items[2590].count, 1)
+FireEvent("CHAT_MSG_LOOT", "You receive item: |cffffffff|Hitem:2591::::::::1:0:0:0:0|h[Pushed Item]|h|rx2.")
+assertEqual("own loot item count tracked (pushed/multiple)", Coffer.db.session.items[2591] and Coffer.db.session.items[2591].count, 2)
+
+-- Someone else's loot in the same channel (must NOT be counted - this is the
+-- party-loot bug found from the user's real chat log) uses a completely different
+-- template ("PlayerName receives loot: ..."), which the self-only patterns never match.
+FireEvent("CHAT_MSG_LOOT", "SomeoneElse receives loot: |cffffffff|Hitem:2592::::::::1:0:0:0:0|h[Wool Cloth]|h|r.")
 assertEqual("other player's loot NOT tracked", Coffer.db.session.items[2592], nil)
 
--- This is the second real bug found: Forever gives every character a two-part name
--- (e.g. "Kabann Aethermere"), and UnitName("player") ("TestPlayer" here) not matching
--- the chat event's sender string exactly ("TestPlayer Surname") was silently dropping
--- the player's own loot. Simulate exactly that mismatch and confirm the fuzzy-match
--- fallback still counts it correctly.
-FireEvent("CHAT_MSG_LOOT", "TestPlayer Surname receives loot: |cffffffff|Hitem:2593::::::::1:0:0:0:0|h[Own Loot, Mismatched Name]|h|r.", "TestPlayer Surname")
-assertEqual("own loot still tracked despite a two-part-name mismatch", Coffer.db.session.items[2593] and Coffer.db.session.items[2593].count, 1)
+-- Loot gold is now parsed directly from CHAT_MSG_MONEY (Blizzard's own localized
+-- "%d Gold"/"%d Silver"/"%d Copper" templates), not inferred from a PLAYER_MONEY delta.
+-- The matching PLAYER_MONEY event is also fired, as the real client would, to confirm
+-- it doesn't double-count this money (not at a merchant, so PLAYER_MONEY is a no-op).
+FireEvent("CHAT_MSG_MONEY", "You loot 1 Gold, 23 Silver, 4 Copper.")
+fakeMoney = fakeMoney + 12304
+FireEvent("PLAYER_MONEY")
+assertEqual("loot money parsed from CHAT_MSG_MONEY, not doubled by PLAYER_MONEY", Coffer.db.session.loot, 12304)
 
--- And confirm GUID match takes priority even when the name doesn't match AT ALL
--- (belt-and-suspenders: this is the primary check, name-matching is only the fallback).
-FireEvent("CHAT_MSG_LOOT", "CompletelyDifferentName receives loot: |cffffffff|Hitem:2594::::::::1:0:0:0:0|h[Own Loot, Via GUID]|h|r.",
-    "CompletelyDifferentName", nil, nil, nil, nil, nil, nil, nil, nil, nil, "Player-1234-ABCDEF01")
-assertEqual("own loot tracked via matching GUID even with an unrelated sender name", Coffer.db.session.items[2594] and Coffer.db.session.items[2594].count, 1)
-
--- And a stranger's loot with a non-matching GUID must still be filtered out.
-FireEvent("CHAT_MSG_LOOT", "Stranger receives loot: |cffffffff|Hitem:2595::::::::1:0:0:0:0|h[Not Your Loot]|h|r.",
-    "Stranger", nil, nil, nil, nil, nil, nil, nil, nil, nil, "Player-9999-FFFFFFFF")
-assertEqual("stranger's loot NOT tracked even with a GUID present", Coffer.db.session.items[2595], nil)
-
--- Simulate a quest turn-in with money reward
+-- Quest money now comes directly from QUEST_TURNED_IN's own argument, not a delta. The
+-- matching PLAYER_MONEY event is also fired (as the real client would) to confirm it
+-- does NOT double-count that same money (PLAYER_MONEY only handles vendor sales and
+-- spending now - everything else is already accounted for by the time it fires).
 FireEvent("QUEST_TURNED_IN", 1234, 500, 5000)
 fakeMoney = fakeMoney + 5000
 FireEvent("PLAYER_MONEY")
-assertEqual("quest money bucket", Coffer.db.session.quest, 5000)
+assertEqual("quest money bucket (direct, not doubled by the matching PLAYER_MONEY)", Coffer.db.session.quest, 5000)
 
 -- Simulate entering then leaving a dungeon instance, with the fake clock advanced past
 -- the 15s minimum run duration so this exercises the "record a finished run" path too.
@@ -291,6 +307,9 @@ _G.IsInInstance = function() return true, "party" end
 FireEvent("PLAYER_ENTERING_WORLD")
 assertEqual("active run starts on instance entry", Coffer:GetActiveRun() ~= nil, true)
 
+-- Loot income during a run now comes via CHAT_MSG_MONEY (see above), not a raw
+-- PLAYER_MONEY bump, matching how Money.lua actually attributes it.
+FireEvent("CHAT_MSG_MONEY", "You loot 777 Copper.")
 fakeMoney = fakeMoney + 777
 FireEvent("PLAYER_MONEY")
 assertEqual("active run tracks loot income", Coffer:GetActiveRun().loot, 777)

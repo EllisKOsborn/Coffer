@@ -16,7 +16,8 @@ worth farming.
 ## Features
 
 - **Live gold/hour** computed from a session that persists across logout/relog (reset
-  it manually with the `reset` button or `/coffer reset` whenever you want a clean read).
+  it manually by right-clicking the "This Session" header, or with `/coffer reset`,
+  whenever you want a clean read).
 - **Income broken out by source**: loot, quest rewards, and vendor sales are tracked
   separately under the hood (see `CofferDB.session`), with Earned/Spent/Total shown
   in the UI.
@@ -51,9 +52,10 @@ to match the addon's `.toc` file exactly.
 ## Usage
 
 - `/coffer` — toggle the panel.
-- `/coffer reset` — reset the current session's totals (run history is kept).
-- `/coffer lock` / `/coffer unlock` — lock the panel in place so it stops being
-  draggable.
+- Right-click the **THIS SESSION** header (or `/coffer reset`) — reset the current
+  session's totals (run history is kept).
+- The gear icon in the panel's header (or `/coffer lock` / `/coffer unlock`) — lock the
+  panel in place so it stops being draggable.
 - `/coffer debug` — prints load/diagnostic info to chat (version, whether
   SavedVariables and the panel loaded, session/run counts). Useful whenever `/coffer`
   seems to do nothing — see Troubleshooting below.
@@ -76,18 +78,30 @@ to match the addon's `.toc` file exactly.
 
 ## How values are classified
 
-WoW doesn't tell addons *why* your money changed, so Coffer infers it:
+Rather than inferring money sources from `PLAYER_MONEY` deltas and timing heuristics,
+Coffer reads the dedicated event/argument each source actually provides (the same
+technique production addons like [KiwiFarm](https://github.com/michaelnpsp/KiwiFarm)
+use):
 
-- A `PLAYER_MONEY` increase right after `QUEST_TURNED_IN` → **quest** gold.
-- A `PLAYER_MONEY` increase while the merchant window is open → **vendor** gold
-  (selling junk).
-- Any other increase → **loot** gold (mobs, chests, pickpocketing, etc.).
-- Any decrease → **spent** (repairs, purchases, training, AH deposits, ...).
+- **Loot gold** is parsed directly out of `CHAT_MSG_MONEY`, using Blizzard's own
+  localized `GOLD_AMOUNT`/`SILVER_AMOUNT`/`COPPER_AMOUNT` message templates turned into
+  Lua patterns - this event fires specifically for money looted, so there's no need to
+  guess whether a balance change was loot.
+- **Quest gold** comes straight from `QUEST_TURNED_IN`'s own `moneyReward` argument.
+- **Vendor gold** and **spending** are the one case with no dedicated event: a
+  `PLAYER_MONEY` increase while the merchant window is open is a sale, any decrease is
+  spending (repairs, purchases, training, AH deposits, ...). By the time this handler
+  runs, loot and quest gold are already accounted for above, so it only has these two
+  cases left to classify - nothing is double-counted.
 
-Item drops are parsed directly out of the item hyperlink in `CHAT_MSG_LOOT` (not the
-surrounding sentence), so detection works regardless of client locale. The sender of
-that event is also checked against your own name, so other party/raid members' loot
-(which fires the same event) is never counted as yours.
+**Item drops** are matched against Blizzard's own localized `LOOT_ITEM_SELF` /
+`LOOT_ITEM_SELF_MULTIPLE` / `LOOT_ITEM_PUSHED_SELF(_MULTIPLE)` chat templates (again,
+turned into Lua patterns) rather than any item link appearing in `CHAT_MSG_LOOT`. Since
+those templates are specifically the "You receive loot: ..." phrasing - distinct from
+"PlayerName receives loot: ..." for other party/raid members - this only ever matches
+your own loot, with no need to compare sender names or GUIDs against the player at all,
+and no risk of ambiguity from World of Warcraft: Forever's two-part name system (every
+character gets a Main Name *and* a Secondary Name).
 
 ## Testing without a WoW client
 

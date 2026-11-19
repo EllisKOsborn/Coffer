@@ -25,8 +25,8 @@ local RED = { 1, 0.37, 0.37 }
 
 local frame
 local gphValue, goldValue
-local durationValue, earnedValue, spentValue, netValue
-local curRunDurationValue, curRunEarnedValue
+local earnedValue, sessionItemsValue, spentValue, netValue
+local curRunEarnedValue
 local itemsSection, runsSection
 local itemRows = {}
 local runRows = {}
@@ -84,15 +84,27 @@ local function CreateLabelRow(parent, labelText, labelColor, valueSize)
     return row, value
 end
 
--- A collapsible section header. Returns the section table; .body should be anchored
--- by the caller and shown/hidden based on section.collapsed.
+-- A collapsible section header: a full-bleed highlighted bar (matching the reference
+-- design) with a chevron + title on the left and a right-aligned "summary" value that
+-- stays visible even while collapsed (session duration, items' total value, run count -
+-- whichever the caller wires up). Left-click toggles collapse; right-click is free for
+-- the caller to hook (used for "reset" on the session section, replacing a separate
+-- always-visible button the reference design has no room for).
+-- Returns the section table; .body should be anchored by the caller and shown/hidden
+-- based on section.collapsed.
 local function CreateSection(parent, title)
     local header = CreateFrame("Button", nil, parent)
     header:SetHeight(ROW_HEIGHT)
     header:SetWidth(PANEL_WIDTH - PADDING * 2)
+    header:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+
+    local bg = header:CreateTexture(nil, "BACKGROUND")
+    bg:SetPoint("TOPLEFT", header, "TOPLEFT", -PADDING, 0)
+    bg:SetPoint("BOTTOMRIGHT", header, "BOTTOMRIGHT", PADDING, 0)
+    bg:SetColorTexture(0.55, 0.43, 0.15, 0.12)
 
     local chevron = header:CreateFontString(nil, "OVERLAY")
-    SetFont(chevron, 10, GOLD)
+    SetFont(chevron, 9, GOLD)
     chevron:SetPoint("LEFT", header, "LEFT", 0, 0)
     chevron:SetText("v")
 
@@ -101,8 +113,16 @@ local function CreateSection(parent, title)
     label:SetPoint("LEFT", chevron, "RIGHT", 5, 0)
     label:SetText(title:upper())
 
-    local section = { header = header, chevron = chevron, label = label, collapsed = false }
-    header:SetScript("OnClick", function()
+    local summary = header:CreateFontString(nil, "OVERLAY")
+    SetFont(summary, 11, MUTED)
+    summary:SetPoint("RIGHT", header, "RIGHT", 0, 0)
+
+    local section = { header = header, chevron = chevron, label = label, summary = summary, collapsed = false }
+    header:SetScript("OnClick", function(_, button)
+        if button == "RightButton" and section.onRightClick then
+            section.onRightClick()
+            return
+        end
         section.collapsed = not section.collapsed
         section.chevron:SetText(section.collapsed and ">" or "v")
         Coffer:RefreshUI()
@@ -181,7 +201,7 @@ local function BuildFrame()
     -- Built manually (no "UIPanelCloseButton" template) for the same reason as
     -- CreateBackdropFrame above: don't assume a named template exists on this client.
     local closeButton = CreateFrame("Button", nil, frame)
-    closeButton:SetSize(18, 18)
+    closeButton:SetSize(16, 16)
     closeButton:SetPoint("TOPRIGHT", -4, -4)
     local closeLabel = closeButton:CreateFontString(nil, "OVERLAY")
     SetFont(closeLabel, 13, MUTED)
@@ -191,14 +211,32 @@ local function BuildFrame()
     closeButton:SetScript("OnLeave", function() SetFont(closeLabel, 13, MUTED) end)
     closeButton:SetScript("OnClick", function() frame:Hide() end)
 
+    -- Settings/lock toggle, using a real icon texture (an actual profession icon that
+    -- happens to look like a gear) rather than a text glyph, since font glyph coverage
+    -- for symbols like a gear/refresh character can't be assumed on any given client.
+    local gearButton = CreateFrame("Button", nil, frame)
+    gearButton:SetSize(15, 15)
+    gearButton:SetPoint("RIGHT", closeButton, "LEFT", -6, 0)
+    local gearIcon = gearButton:CreateTexture(nil, "ARTWORK")
+    gearIcon:SetAllPoints()
+    gearIcon:SetTexture("Interface\\Icons\\Trade_Engineering")
+    gearIcon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+    gearIcon:SetVertexColor(0.65, 0.65, 0.65)
+    gearButton:SetScript("OnEnter", function() gearIcon:SetVertexColor(1, 0.82, 0) end)
+    gearButton:SetScript("OnLeave", function() gearIcon:SetVertexColor(0.65, 0.65, 0.65) end)
+    gearButton:SetScript("OnClick", function()
+        Coffer.db.settings.locked = not Coffer.db.settings.locked
+        print("|cffffd200Coffer:|r Frame " .. (Coffer.db.settings.locked and "locked" or "unlocked") .. ".")
+    end)
+
     local cursor = frame:CreateTexture(nil, "ARTWORK") -- anchor placeholder
     cursor:SetPoint("TOPLEFT", icon, "BOTTOMLEFT", 0, -10)
     cursor:SetSize(1, 1)
     frame.cursor = cursor
 
     -- gold per hour
-    local gphRow, gphVal = CreateLabelRow(frame, "Gold per hour", MUTED, 16)
-    SetFont(gphVal, 16, GOLD, "")
+    local gphRow, gphVal = CreateLabelRow(frame, "Gold per hour", MUTED, 15)
+    SetFont(gphVal, 15, GOLD, "")
     gphRow:SetPoint("TOPLEFT", cursor, "BOTTOMLEFT", 0, 0)
     gphValue = gphVal
 
@@ -208,74 +246,60 @@ local function BuildFrame()
     frame.goldRow = goldRow
 
     -- current run section: only visible while inside a tracked (5-player) instance.
-    -- Shows live duration and net gold earned since zoning in, separate from the
-    -- all-time "This Session" total below it.
+    -- Duration lives on the header row itself (matching This Session below), so the
+    -- body is just the one "Earned here" row.
     local currentRun = CreateSection(frame, "Current Run")
     currentRun.header:SetPoint("TOPLEFT", goldRow, "BOTTOMLEFT", 0, -14) -- re-anchored every refresh
 
-    local curDurRow, curDurVal = CreateLabelRow(frame, "Duration", MUTED)
-    curDurRow:SetPoint("TOPLEFT", currentRun.header, "BOTTOMLEFT", 0, -2)
-    curRunDurationValue = curDurVal
-
     local curEarnedRow, curEarnedVal = CreateLabelRow(frame, "Earned here", MUTED)
-    curEarnedRow:SetPoint("TOPLEFT", curDurRow, "BOTTOMLEFT", 0, -2)
+    curEarnedRow:SetPoint("TOPLEFT", currentRun.header, "BOTTOMLEFT", 0, -2)
     curRunEarnedValue = curEarnedVal
 
-    currentRun.body = { curDurRow, curEarnedRow }
+    currentRun.body = { curEarnedRow }
     currentRun.bottom = curEarnedRow
     frame.currentRunSection = currentRun
 
-    -- session section
+    -- session section: duration shown on the header row itself; reset is a right-click
+    -- on the header (there's no room in this layout for a separate always-visible
+    -- button once duration moved onto that row).
     local session = CreateSection(frame, "This Session")
     session.header:SetPoint("TOPLEFT", currentRun.header, "BOTTOMLEFT", 0, -14) -- re-anchored every refresh
-
-    local resetButton = CreateFrame("Button", nil, frame)
-    resetButton:SetSize(40, 14)
-    resetButton:SetPoint("RIGHT", session.header, "RIGHT", 0, 0)
-    local resetText = resetButton:CreateFontString(nil, "OVERLAY")
-    SetFont(resetText, 10, MUTED)
-    resetText:SetPoint("CENTER")
-    resetText:SetText("reset")
-    resetButton:SetScript("OnEnter", function() SetFont(resetText, 10, GOLD) end)
-    resetButton:SetScript("OnLeave", function() SetFont(resetText, 10, MUTED) end)
-    resetButton:SetScript("OnClick", function()
+    session.onRightClick = function()
         if StaticPopup_Show then
             StaticPopup_Show("COFFER_CONFIRM_RESET")
         else
             Coffer:ResetSession()
         end
-    end)
-
-    local durRow, durVal = CreateLabelRow(frame, "Duration", MUTED)
-    durRow:SetPoint("TOPLEFT", session.header, "BOTTOMLEFT", 0, -2)
-    durationValue = durVal
+    end
 
     local earnedRow, earnedVal = CreateLabelRow(frame, "Earned", MUTED)
-    earnedRow:SetPoint("TOPLEFT", durRow, "BOTTOMLEFT", 0, -2)
+    earnedRow:SetPoint("TOPLEFT", session.header, "BOTTOMLEFT", 0, -2)
     earnedValue = earnedVal
 
+    local itemsValueRow, itemsValueVal = CreateLabelRow(frame, "Items", MUTED)
+    itemsValueRow:SetPoint("TOPLEFT", earnedRow, "BOTTOMLEFT", 0, -2)
+    sessionItemsValue = itemsValueVal
+
     local spentRow, spentVal = CreateLabelRow(frame, "Spent", MUTED)
-    spentRow:SetPoint("TOPLEFT", earnedRow, "BOTTOMLEFT", 0, -2)
+    spentRow:SetPoint("TOPLEFT", itemsValueRow, "BOTTOMLEFT", 0, -2)
     spentValue = spentVal
 
     local netRow, netVal = CreateLabelRow(frame, "Total", MUTED)
     netRow:SetPoint("TOPLEFT", spentRow, "BOTTOMLEFT", 0, -2)
     netValue = netVal
-    session.body = { durRow, earnedRow, spentRow, netRow }
+    session.body = { earnedRow, itemsValueRow, spentRow, netRow }
     session.bottom = netRow
 
-    -- items section
+    -- items section: total value of everything tracked this session shown right on the
+    -- header row, with an "and N more" line below the visible rows when there's overflow.
     itemsSection = CreateSection(frame, "Items")
     itemsSection.header:SetPoint("TOPLEFT", session.bottom, "BOTTOMLEFT", 0, -14)
     itemsSection.more = frame:CreateFontString(nil, "OVERLAY")
     SetFont(itemsSection.more, 10, MUTED)
     itemsSection.more:SetPoint("LEFT", 0, 0)
 
-    -- runs section
+    -- runs section: run count shown right on the header row instead of a footer line.
     runsSection = CreateSection(frame, "Recent Runs")
-    runsSection.more = frame:CreateFontString(nil, "OVERLAY")
-    SetFont(runsSection.more, 10, MUTED)
-    runsSection.more:SetPoint("LEFT", 0, 0)
 
     frame.sessionSection = session
 
@@ -324,6 +348,7 @@ local function LayoutCurrentRun(anchor)
     section.header:SetPoint("TOPLEFT", anchor, "BOTTOMLEFT", 0, -14)
     section.header:Show()
     section.label:SetText(("CURRENT RUN \226\128\148 %s"):format((run.name or "Unknown"):upper()))
+    section.summary:SetText(Coffer:FormatDuration(time() - run.startTime))
 
     local visible = not section.collapsed
     for _, row in ipairs(section.body) do
@@ -333,7 +358,6 @@ local function LayoutCurrentRun(anchor)
         return section.header, SECTION_HEADER_STEP
     end
 
-    curRunDurationValue:SetText(Coffer:FormatDuration(time() - run.startTime))
     local net = run.loot + run.quest + run.vendor - run.spent
     local color = net >= 0 and GREEN or RED
     curRunEarnedValue:SetText(Coffer:FormatSignedMoney(net))
@@ -359,8 +383,10 @@ local function LayoutItems(anchor)
     local cursor = itemsSection.header
     local heightUsed = SECTION_HEADER_STEP
 
+    local list = SortedItems()
+    itemsSection.summary:SetText(Coffer:FormatGoldIcon(Coffer:GetSessionItemsValue()))
+
     if not itemsSection.collapsed then
-        local list = SortedItems()
         for i = 1, math.min(#list, MAX_VISIBLE_ITEMS) do
             local data = list[i]
             local row = AcquireRow(itemRows, frame)
@@ -373,7 +399,7 @@ local function LayoutItems(anchor)
             row.name:SetText((name or ("item:" .. data.itemID)) .. (data.entry.count > 1 and ("  x" .. data.entry.count) or ""))
             row.name:SetWidth(PANEL_WIDTH - PADDING * 2 - 60)
             if data.entry.value then
-                row.value:SetText(Coffer:FormatGold(data.entry.value * data.entry.count) .. "g")
+                row.value:SetText(Coffer:FormatGoldIcon(data.entry.value * data.entry.count))
             else
                 row.value:SetText("...")
             end
@@ -406,8 +432,10 @@ local function LayoutRuns(anchor)
     local cursor = runsSection.header
     local heightUsed = SECTION_HEADER_STEP
 
+    local runs = Coffer.db.runs
+    runsSection.summary:SetText(#runs == 1 and "1 run" or (#runs .. " runs"))
+
     if not runsSection.collapsed then
-        local runs = Coffer.db.runs
         for i = 1, math.min(#runs, MAX_VISIBLE_RUNS) do
             local run = runs[i]
             local row = AcquireRow(runRows, frame)
@@ -425,20 +453,8 @@ local function LayoutRuns(anchor)
             heightUsed = heightUsed + ROW_STEP
         end
         ReleaseUnused(runRows)
-
-        if #runs > MAX_VISIBLE_RUNS then
-            runsSection.more:ClearAllPoints()
-            runsSection.more:SetPoint("TOPLEFT", cursor, "BOTTOMLEFT", 19, -2)
-            runsSection.more:SetText(#runs .. " runs")
-            runsSection.more:Show()
-            cursor = runsSection.more
-            heightUsed = heightUsed + MORE_LINE_STEP
-        else
-            runsSection.more:Hide()
-        end
     else
         ReleaseUnused(runRows)
-        runsSection.more:Hide()
     end
 
     return cursor, heightUsed
@@ -447,16 +463,19 @@ end
 local function RefreshUIImpl()
     if not frame or not frame:IsShown() or not Coffer.db then return end
 
-    gphValue:SetText(Coffer:FormatGold(Coffer:GetGoldPerHour()) .. "g/hr")
+    gphValue:SetText(Coffer:FormatGoldIcon(Coffer:GetGoldPerHour()) .. "/hr")
     goldValue:SetText(Coffer:FormatMoney(GetMoney()))
 
-    durationValue:SetText(Coffer:FormatDuration(Coffer:GetSessionDuration()))
-    earnedValue:SetText("+" .. Coffer:FormatGold(Coffer:GetSessionEarned()))
+    frame.sessionSection.summary:SetText(Coffer:FormatDuration(Coffer:GetSessionDuration()))
+    earnedValue:SetText(Coffer:FormatSignedGoldIcon(Coffer:GetSessionEarned()))
     earnedValue:SetTextColor(GREEN[1], GREEN[2], GREEN[3])
-    spentValue:SetText("-" .. Coffer:FormatGold(Coffer.db.session.spent))
+    local itemsValue = Coffer:GetSessionItemsValue()
+    sessionItemsValue:SetText(Coffer:FormatSignedGoldIcon(itemsValue))
+    sessionItemsValue:SetTextColor(GREEN[1], GREEN[2], GREEN[3])
+    spentValue:SetText(Coffer:FormatSignedGoldIcon(-Coffer.db.session.spent))
     spentValue:SetTextColor(RED[1], RED[2], RED[3])
     local net = Coffer:GetSessionNet()
-    netValue:SetText(Coffer:FormatSigned(net))
+    netValue:SetText(Coffer:FormatSignedGoldIcon(net))
     local netColor = net >= 0 and GREEN or RED
     netValue:SetTextColor(netColor[1], netColor[2], netColor[3])
 

@@ -133,6 +133,22 @@ function Coffer:FormatSignedMoney(copper)
     return sign .. self:FormatMoney(copper)
 end
 
+-- A small embedded gold-coin icon (the same texture GetCoinTextureString uses),
+-- appended after a whole-gold amount. Used for the bigger aggregate numbers (gold/hour,
+-- session totals, item values) where showing a coin icon per amount - as in the
+-- reference design - matters more than silver/copper precision.
+local GOLD_COIN_ICON = "|TInterface\\MoneyFrame\\UI-GoldIcon:12:12:2:0|t"
+
+function Coffer:FormatGoldIcon(copper)
+    return self:FormatGold(copper) .. " " .. GOLD_COIN_ICON
+end
+
+function Coffer:FormatSignedGoldIcon(copper)
+    copper = copper or 0
+    local sign = copper < 0 and "-" or "+"
+    return sign .. self:FormatGold(copper) .. " " .. GOLD_COIN_ICON
+end
+
 function Coffer:FormatDuration(seconds)
     seconds = math.floor(seconds or 0)
     local hours = math.floor(seconds / 3600)

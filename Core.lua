@@ -167,16 +167,25 @@ local function PrintDebug()
         print("  Items tracked this session: " .. CountKeys(Coffer.db.session.items))
         print("  Runs recorded: " .. #Coffer.db.runs)
     end
-    local f = _G.CofferFrame
-    print("  Panel frame built: " .. tostring(f ~= nil))
-    if f then
-        print("  Panel shown: " .. tostring(f:IsShown()))
+    local built = Coffer:ForceShowPanel()
+    print("  Panel build+show attempt succeeded: " .. tostring(built))
+    local geo = Coffer:GetPanelGeometry()
+    if geo then
+        print(("  Panel geometry: %.0fx%.0f at (left=%s, top=%s), strata=%s, alpha=%s"):format(
+            geo.width or -1, geo.height or -1, tostring(geo.left), tostring(geo.top), tostring(geo.strata), tostring(geo.alpha)))
+        print("  Panel shown: " .. tostring(geo.shown) .. "   Panel actually visible on screen: " .. tostring(geo.visible))
+        if geo.shown and not geo.visible then
+            print("  |cffff0000Shown is true but visible is false - an ancestor frame is hidden; this shouldn't")
+            print("  happen for a UIParent-attached frame, please report this.|r")
+        elseif geo.width and geo.width > 0 and (not geo.height or geo.height <= 1) then
+            print("  |cffff0000Height looks collapsed (<=1px) - the panel exists but has no visible content area.|r")
+        end
+    else
+        print("  |cffff0000Panel frame could not be built at all - see the red error above, if any.|r")
     end
-    print("  If you see this message at all, Coffer IS loaded and running - /coffer not")
-    print("  opening the panel would then be a display bug, not a load failure. If you")
-    print("  never see this after typing /coffer debug, Coffer never loaded: check the")
-    print("  AddOns list at character select (is it checked? flagged out-of-date?) and")
-    print("  that the folder is World of Warcraft\\_forever_\\Interface\\AddOns\\Coffer.")
+    print("  If you see this message at all, Coffer IS loaded and running. If a panel still")
+    print("  isn't visible on screen now (this command just tried to force it open), please")
+    print("  send me this entire debug output, including any red error lines above it.")
 end
 
 SLASH_COFFER1 = "/coffer"

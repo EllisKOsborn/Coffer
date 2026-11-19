@@ -141,7 +141,6 @@ end
 local function BuildFrame()
     frame = CreateBackdropFrame(UIParent, "CofferFrame")
     frame:SetWidth(PANEL_WIDTH)
-    frame:SetPoint("CENTER")
     frame:SetMovable(true)
     frame:EnableMouse(true)
     frame:RegisterForDrag("LeftButton")
@@ -265,20 +264,18 @@ local function BuildFrame()
     runsSection.more:SetPoint("LEFT", 0, 0)
 
     frame.sessionSection = session
+
+    -- Always anchor from TOPLEFT (restored position, or a fixed default) rather than
+    -- CENTER, so later SetHeight calls - as content grows or shrinks - only move the
+    -- bottom edge, never the top. Previously this computed a TOPLEFT equivalent from a
+    -- CENTER anchor via GetLeft()/GetTop(); anchoring TOPLEFT directly is simpler and
+    -- removes a dependency on those returning usable values at build time.
+    frame:ClearAllPoints()
     if Coffer.db.settings.point then
         local point, relPoint, x, y = unpack(Coffer.db.settings.point)
-        frame:ClearAllPoints()
         frame:SetPoint(point, UIParent, relPoint, x, y)
-    end
-
-    -- Normalize to a TOPLEFT anchor so later SetHeight calls (as content grows or
-    -- shrinks) only move the bottom edge, never the top, regardless of which corner
-    -- the frame happened to be anchored from above.
-    frame:SetHeight(1)
-    local left, top = frame:GetLeft(), frame:GetTop()
-    if left and top then
-        frame:ClearAllPoints()
-        frame:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", left, top)
+    else
+        frame:SetPoint("TOPLEFT", UIParent, "TOPLEFT", 240, -200)
     end
 
     frame:SetScript("OnShow", function()
@@ -460,21 +457,48 @@ function Coffer:RefreshUI()
     end
 end
 
-function Coffer:ToggleFrame()
-    if not frame then
-        local ok, err = pcall(BuildFrame)
-        if not ok then
-            print("|cffff0000Coffer failed to build its panel:|r " .. tostring(err))
-            print("|cffff0000Coffer:|r please report this error (and your /coffer debug output) so it can be fixed.")
-            return
-        end
+local function EnsureFrame()
+    if frame then return true end
+    local ok, err = pcall(BuildFrame)
+    if not ok then
+        print("|cffff0000Coffer failed to build its panel:|r " .. tostring(err))
+        print("|cffff0000Coffer:|r please report this error (and your /coffer debug output) so it can be fixed.")
+        return false
     end
+    return true
+end
+
+function Coffer:ToggleFrame()
+    if not EnsureFrame() then return end
     if frame:IsShown() then
         frame:Hide()
     else
         frame:Show()
         self:RefreshUI()
     end
+end
+
+-- Builds the panel if needed and always shows it (never toggles it closed). Used by
+-- /coffer debug so running that command can never itself hide an already-open panel.
+function Coffer:ForceShowPanel()
+    if not EnsureFrame() then return false end
+    frame:Show()
+    self:RefreshUI()
+    return true
+end
+
+function Coffer:GetPanelGeometry()
+    if not frame then return nil end
+    return {
+        width = frame:GetWidth(),
+        height = frame:GetHeight(),
+        left = frame:GetLeft(),
+        top = frame:GetTop(),
+        shown = frame:IsShown(),
+        visible = frame:IsVisible(),
+        strata = frame:GetFrameStrata(),
+        alpha = frame:GetAlpha(),
+    }
 end
 
 if StaticPopupDialogs then

@@ -26,13 +26,35 @@ end
 
 -- In a party/raid, CHAT_MSG_LOOT also fires for OTHER members' loot (e.g. "Jump High
 -- receives loot: [Mote of Unstable Magic]."), not just your own ("You receive loot:
--- ..."). The event's sender argument identifies who actually looted it; if it's
--- populated and isn't you, this is someone else's drop and must not be counted.
-Coffer:On("CHAT_MSG_LOOT", function(self, _, message, sender)
-    local playerName = UnitName("player")
-    if sender and sender ~= "" and sender ~= playerName and not sender:find("^" .. playerName .. "%-") then
-        return
+-- ..."). World of Warcraft: Forever gives every character a two-part name (e.g.
+-- "Kabann Aethermere"), and it isn't confirmed that UnitName("player") and the chat
+-- event's sender string always format that the same way - comparing them as plain
+-- strings silently dropped the player's own loot entirely in testing. GUID is the one
+-- identifier that can't be ambiguous regardless of any naming system, so that's tried
+-- first; a fuzzy (substring, either direction) name match is kept only as a fallback
+-- for whenever a GUID isn't available on the event.
+local function IsOwnLoot(sender, guid)
+    local playerGUID = UnitGUID("player")
+    if guid and guid ~= "" then
+        return playerGUID ~= nil and guid == playerGUID
     end
+    if not sender or sender == "" then
+        return true -- no sender info at all - this is "You receive loot: ..." (yourself)
+    end
+    local playerName = UnitName("player")
+    if sender == playerName then
+        return true
+    end
+    if playerName and (sender:find(playerName, 1, true) or playerName:find(sender, 1, true)) then
+        return true
+    end
+    return false
+end
+
+Coffer:On("CHAT_MSG_LOOT", function(self, _, ...)
+    local message, sender = ...
+    local guid = select(12, ...)
+    if not IsOwnLoot(sender, guid) then return end
 
     local link = message:match(LINK_PATTERN)
     if not link then return end

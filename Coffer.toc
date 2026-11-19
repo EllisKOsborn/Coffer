@@ -5,7 +5,7 @@
 ## Interface: 16001
 ## Title: |cffffd200Coffer|r
 ## Notes: The most accurate gold tracker for World of Warcraft: Forever. Tracks raw gold loot, item drops, quest hand-ins and vendor sales per dungeon run, with full session and run history.
-## Version: 0.2.2
+## Version: 0.3.0
 ## SavedVariablesPerCharacter: CofferDB
 ## IconTexture: Interface\Icons\INV_Misc_Coin_01
 

@@ -109,6 +109,7 @@ _G.GetCoinTextureString = function(c) return tostring(c) .. "c" end
 _G.GetBuildInfo = function() return "1.60.1", "99999", "Jan 1 2026", 16001 end
 
 _G.UnitName = function(unit) return "TestPlayer" end
+_G.UnitGUID = function(unit) return "Player-1234-ABCDEF01" end
 
 _G.GetItemInfo = function(itemID)
     return "Test Item " .. tostring(itemID), "itemlink", 2, 1, 1, "Misc", "Junk", 1, "", 134400, 12, 0, 0, 1, 0, 0, false
@@ -258,6 +259,25 @@ assertEqual("own loot money bucket (loot)", Coffer.db.session.loot, 1234)
 -- party-loot bug found from the user's real chat log)
 FireEvent("CHAT_MSG_LOOT", "SomeoneElse receives loot: |cffffffff|Hitem:2592::::::::1:0:0:0:0|h[Wool Cloth]|h|r.", "SomeoneElse")
 assertEqual("other player's loot NOT tracked", Coffer.db.session.items[2592], nil)
+
+-- This is the second real bug found: Forever gives every character a two-part name
+-- (e.g. "Kabann Aethermere"), and UnitName("player") ("TestPlayer" here) not matching
+-- the chat event's sender string exactly ("TestPlayer Surname") was silently dropping
+-- the player's own loot. Simulate exactly that mismatch and confirm the fuzzy-match
+-- fallback still counts it correctly.
+FireEvent("CHAT_MSG_LOOT", "TestPlayer Surname receives loot: |cffffffff|Hitem:2593::::::::1:0:0:0:0|h[Own Loot, Mismatched Name]|h|r.", "TestPlayer Surname")
+assertEqual("own loot still tracked despite a two-part-name mismatch", Coffer.db.session.items[2593] and Coffer.db.session.items[2593].count, 1)
+
+-- And confirm GUID match takes priority even when the name doesn't match AT ALL
+-- (belt-and-suspenders: this is the primary check, name-matching is only the fallback).
+FireEvent("CHAT_MSG_LOOT", "CompletelyDifferentName receives loot: |cffffffff|Hitem:2594::::::::1:0:0:0:0|h[Own Loot, Via GUID]|h|r.",
+    "CompletelyDifferentName", nil, nil, nil, nil, nil, nil, nil, nil, nil, "Player-1234-ABCDEF01")
+assertEqual("own loot tracked via matching GUID even with an unrelated sender name", Coffer.db.session.items[2594] and Coffer.db.session.items[2594].count, 1)
+
+-- And a stranger's loot with a non-matching GUID must still be filtered out.
+FireEvent("CHAT_MSG_LOOT", "Stranger receives loot: |cffffffff|Hitem:2595::::::::1:0:0:0:0|h[Not Your Loot]|h|r.",
+    "Stranger", nil, nil, nil, nil, nil, nil, nil, nil, nil, "Player-9999-FFFFFFFF")
+assertEqual("stranger's loot NOT tracked even with a GUID present", Coffer.db.session.items[2595], nil)
 
 -- Simulate a quest turn-in with money reward
 FireEvent("QUEST_TURNED_IN", 1234, 500, 5000)

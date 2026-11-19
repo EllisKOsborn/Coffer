@@ -124,6 +124,15 @@ function Coffer:FormatSigned(copper)
     return sign .. self:FormatGold(copper)
 end
 
+-- Like FormatSigned, but at full silver/copper precision instead of rounding down to
+-- whole gold. Used anywhere a single dungeon run's worth of money is shown: a run that
+-- only dropped a few silver would otherwise always display as a misleading "+0".
+function Coffer:FormatSignedMoney(copper)
+    copper = copper or 0
+    local sign = copper < 0 and "-" or "+"
+    return sign .. self:FormatMoney(copper)
+end
+
 function Coffer:FormatDuration(seconds)
     seconds = math.floor(seconds or 0)
     local hours = math.floor(seconds / 3600)

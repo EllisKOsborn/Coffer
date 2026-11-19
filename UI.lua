@@ -336,7 +336,7 @@ local function LayoutCurrentRun(anchor)
     curRunDurationValue:SetText(Coffer:FormatDuration(time() - run.startTime))
     local net = run.loot + run.quest + run.vendor - run.spent
     local color = net >= 0 and GREEN or RED
-    curRunEarnedValue:SetText(Coffer:FormatSigned(net))
+    curRunEarnedValue:SetText(Coffer:FormatSignedMoney(net))
     curRunEarnedValue:SetTextColor(color[1], color[2], color[3])
 
     return section.bottom, SECTION_HEADER_STEP + (#section.body * ROW_STEP)
@@ -419,7 +419,7 @@ local function LayoutRuns(anchor)
             row.name:SetWidth(PANEL_WIDTH - PADDING * 2 - 60)
             local net = run.loot + run.quest + run.vendor - run.spent
             local color = net >= 0 and GREEN or RED
-            row.value:SetText(Coffer:FormatSigned(net) .. "g")
+            row.value:SetText(Coffer:FormatSignedMoney(net))
             row.value:SetTextColor(color[1], color[2], color[3])
             cursor = row
             heightUsed = heightUsed + ROW_STEP

@@ -452,12 +452,20 @@ local function RefreshUIImpl()
     local afterItems = LayoutItems(afterSession)
     local afterRuns = LayoutRuns(afterItems)
 
-    -- Height from top of frame down to the bottom-most visible element, plus padding.
-    local top = frame:GetTop()
-    local bottom = afterRuns:GetBottom()
-    if top and bottom then
-        frame:SetHeight((top - bottom) + PADDING)
-    end
+    -- GetTop()/GetBottom() can return nil when called in the same script execution
+    -- that just anchored these frames - WoW hasn't run a layout pass yet, so the
+    -- geometry isn't resolved. This bit us for real: the panel built and showed
+    -- successfully but ended up with height 0 (no visible background/border) because
+    -- this measurement silently failed every time. Deferring one tick (0 seconds,
+    -- i.e. "next frame") gives the engine a chance to resolve the anchors first.
+    local measureFrame, measureBottom = frame, afterRuns
+    C_Timer.After(0, function()
+        local top = measureFrame:GetTop()
+        local bottom = measureBottom:GetBottom()
+        if top and bottom then
+            measureFrame:SetHeight((top - bottom) + PADDING)
+        end
+    end)
 end
 
 -- Every refresh (the 2s ticker, every money/loot/run event, manual toggles) goes

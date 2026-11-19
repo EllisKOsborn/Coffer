@@ -5,8 +5,19 @@
 local Widget = {}
 Widget.__index = Widget
 
+-- Real WoW does not resolve a frame's actual on-screen geometry synchronously the
+-- instant SetPoint() is called: Get{Top,Bottom,Left,Right}() can return nil until a
+-- layout pass has run, which happens on the next rendered frame, not mid-script. This
+-- bit Coffer for real (a panel that built and showed successfully but got stuck at
+-- height 0 because a geometry read right after anchoring it silently returned nil) and
+-- wasn't caught by this harness because the mock always returned a plausible number.
+-- Modeling that: SetPoint/ClearAllPoints mark a widget "dirty" (geometry unresolved)
+-- until __FlushLayout() runs, which simulates "a frame has now rendered."
+local allWidgets = {}
+
 local function NewWidget(kind)
-    local w = setmetatable({ kind = kind, shown = true, scripts = {}, points = {} }, Widget)
+    local w = setmetatable({ kind = kind, shown = true, scripts = {}, points = {}, dirty = true }, Widget)
+    table.insert(allWidgets, w)
     return w
 end
 
@@ -15,17 +26,17 @@ function Widget:SetWidth(w) self.width = w end
 function Widget:SetHeight(h) self.height = h end
 function Widget:GetWidth() return self.width or 100 end
 function Widget:GetHeight() return self.height or 20 end
-function Widget:SetPoint(...) table.insert(self.points, { ... }) end
-function Widget:ClearAllPoints() self.points = {} end
+function Widget:SetPoint(...) table.insert(self.points, { ... }); self.dirty = true end
+function Widget:ClearAllPoints() self.points = {}; self.dirty = true end
 function Widget:GetPoint()
     local p = self.points[#self.points]
     if not p then return "CENTER", nil, "CENTER", 0, 0 end
     return p[1], p[2], p[3] or p[2], p[4] or 0, p[5] or 0
 end
-function Widget:GetLeft() return 100 end
-function Widget:GetRight() return 380 end
-function Widget:GetTop() return 500 end
-function Widget:GetBottom() return self:GetTop() - (self.height or 20) end
+function Widget:GetLeft() if self.dirty then return nil end return 100 end
+function Widget:GetRight() if self.dirty then return nil end return 380 end
+function Widget:GetTop() if self.dirty then return nil end return 500 end
+function Widget:GetBottom() if self.dirty then return nil end return self:GetTop() - (self.height or 20) end
 function Widget:SetMovable() end
 function Widget:EnableMouse() end
 function Widget:EnableMouseWheel() end
@@ -74,6 +85,7 @@ _G.CreateFrame = function(kind, name, parent, template)
 end
 
 _G.UIParent = NewWidget("Frame")
+_G.UIParent.dirty = false -- the root frame is always already on screen
 _G.ITEM_QUALITY_COLORS = {
     [0] = { r = 0.62, g = 0.62, b = 0.62 },
     [1] = { r = 1, g = 1, b = 1 },
@@ -114,9 +126,13 @@ _G.Item = {
 _G.IsInInstance = function() return false, "none" end
 _G.GetInstanceInfo = function() return "Mock Instance", "party", 1, "Normal", 5, 0, false, 12345, 5, 0 end
 
+-- Genuinely deferred (not invoked here), matching real WoW: a 0-second C_Timer.After
+-- still waits for the next frame, it doesn't run synchronously. __FlushLayout() below
+-- runs these, simulating that next frame actually happening.
+local pendingAfters = {}
 local timers = {}
 _G.C_Timer = {
-    After = function(delay, fn) table.insert(timers, fn) end,
+    After = function(delay, fn) table.insert(pendingAfters, fn) end,
     NewTimer = function(delay, fn)
         local t = { Cancel = function() end }
         table.insert(timers, fn)
@@ -126,6 +142,21 @@ _G.C_Timer = {
         return { Cancel = function() end }
     end,
 }
+
+-- Test-only helper (not part of the real WoW API): simulates "a frame has now been
+-- rendered" by clearing every widget's dirty flag, then runs whatever C_Timer.After
+-- callbacks were queued (in registration order) - matching a 0-second deferred call
+-- actually firing on the next frame, after layout has settled.
+function _G.__FlushLayout()
+    for _, w in ipairs(allWidgets) do
+        w.dirty = false
+    end
+    local toRun = pendingAfters
+    pendingAfters = {}
+    for _, fn in ipairs(toRun) do
+        fn()
+    end
+end
 
 _G.strtrim = function(s) return (s:gsub("^%s+", ""):gsub("%s+$", "")) end
 local fakeClock = os.time()
@@ -176,6 +207,14 @@ end
 FireEvent("ADDON_LOADED", "Coffer")
 print("ADDON_LOADED fired OK")
 
+local function assertEqual(label, actual, expected)
+    if actual ~= expected then
+        print("ASSERTION FAILED: " .. label .. " -- expected " .. tostring(expected) .. ", got " .. tostring(actual))
+        os.exit(1)
+    end
+    print("ASSERT OK: " .. label .. " == " .. tostring(actual))
+end
+
 -- Simulate plain /coffer (should build + show the panel)
 local ok, err = pcall(function() SlashCmdList["COFFER"]("") end)
 if not ok then
@@ -184,21 +223,31 @@ if not ok then
 end
 print("/coffer (toggle) OK -- panel exists: " .. tostring(_G.CofferFrame ~= nil) .. ", shown: " .. tostring(_G.CofferFrame and _G.CofferFrame:IsShown()))
 
+-- This is the exact bug found from the user's real debug output: geometry read in the
+-- same script execution that just built/anchored the panel must come back unresolved
+-- (nil/never-set), and the deferred C_Timer.After callback that fixes it must still be
+-- sitting queued, not yet run.
+assertEqual("frame height NOT YET set (still queued in a deferred callback)", _G.CofferFrame.height, nil)
+assertEqual("frame top NOT YET resolved (geometry unresolved before layout)", _G.CofferFrame:GetTop(), nil)
+
+__FlushLayout() -- simulate the next rendered frame actually happening
+
+assertEqual("frame top resolves after a simulated layout pass", _G.CofferFrame:GetTop() ~= nil, true)
+assertEqual("frame height gets set once geometry resolves", _G.CofferFrame.height ~= nil, true)
+if _G.CofferFrame.height <= 1 then
+    print("ASSERTION FAILED: frame height is still collapsed (<=1px) after layout settled")
+    os.exit(1)
+end
+print("ASSERT OK: frame height is a real, non-collapsed value (" .. tostring(_G.CofferFrame.height) .. "px)")
+
 -- Simulate /coffer debug
 local ok2, err2 = pcall(function() SlashCmdList["COFFER"]("debug") end)
 if not ok2 then
     print("SLASH /coffer debug ERROR: " .. tostring(err2))
     os.exit(1)
 end
+__FlushLayout()
 print("/coffer debug OK -- debug window shown: " .. tostring(_G.CofferDebugFrame and _G.CofferDebugFrame:IsShown()))
-
-local function assertEqual(label, actual, expected)
-    if actual ~= expected then
-        print("ASSERTION FAILED: " .. label .. " -- expected " .. tostring(expected) .. ", got " .. tostring(actual))
-        os.exit(1)
-    end
-    print("ASSERT OK: " .. label .. " == " .. tostring(actual))
-end
 
 -- Simulate looting an item (CHAT_MSG_LOOT) as the player
 fakeMoney = fakeMoney + 1234

@@ -207,6 +207,29 @@ local function PrintDebug()
     local fullText = table.concat(lines, "\n")
     if Coffer.ShowDebugText then
         Coffer:ShowDebugText(fullText)
+
+        -- The geometry measured above is taken immediately after (re)building the
+        -- panel, in the same script execution - WoW hasn't necessarily resolved the
+        -- anchor layout yet, so left/top/height can read as nil/0 even when the panel
+        -- is about to render correctly. Re-check shortly after and append the settled
+        -- numbers to the same window, so one /coffer debug run gives the real answer
+        -- instead of needing to be run twice.
+        C_Timer.After(0.3, function()
+            local geo = Coffer:GetPanelGeometry()
+            local extra = "\n\n(re-checked 0.3s later, after layout should have settled)\n"
+            if geo then
+                extra = extra .. ("  Panel geometry: %.0fx%.0f at (left=%s, top=%s)\n"):format(
+                    geo.width or -1, geo.height or -1, tostring(geo.left), tostring(geo.top))
+                extra = extra .. "  Panel shown: " .. tostring(geo.shown) .. "   visible: " .. tostring(geo.visible)
+                if geo.height and geo.height > 1 and geo.left and geo.top then
+                    extra = extra .. "\n  This all looks healthy now - if you still don't see the panel on screen,"
+                    extra = extra .. "\n  it may be positioned off your visible screen area, or behind another window."
+                end
+            else
+                extra = extra .. "  Panel frame no longer exists."
+            end
+            Coffer:ShowDebugText(fullText .. extra)
+        end)
     else
         print("|cffff0000Coffer:|r couldn't open the debug window (UI not loaded) - see the printed lines above instead.")
     end

@@ -15,6 +15,7 @@ local RED = { 1, 0.37, 0.37 }
 local frame
 local gphValue, goldValue
 local durationValue, earnedValue, spentValue, netValue
+local curRunDurationValue, curRunEarnedValue
 local itemsSection, runsSection
 local itemRows = {}
 local runRows = {}
@@ -73,7 +74,7 @@ local function CreateSection(parent, title)
     label:SetPoint("LEFT", chevron, "RIGHT", 5, 0)
     label:SetText(title:upper())
 
-    local section = { header = header, chevron = chevron, collapsed = false }
+    local section = { header = header, chevron = chevron, label = label, collapsed = false }
     header:SetScript("OnClick", function()
         section.collapsed = not section.collapsed
         section.chevron:SetText(section.collapsed and ">" or "v")
@@ -170,10 +171,29 @@ local function BuildFrame()
     local goldRow, goldVal = CreateLabelRow(frame, "Your gold", MUTED)
     goldRow:SetPoint("TOPLEFT", gphRow, "BOTTOMLEFT", 0, -6)
     goldValue = goldVal
+    frame.goldRow = goldRow
+
+    -- current run section: only visible while inside a tracked (5-player) instance.
+    -- Shows live duration and net gold earned since zoning in, separate from the
+    -- all-time "This Session" total below it.
+    local currentRun = CreateSection(frame, "Current Run")
+    currentRun.header:SetPoint("TOPLEFT", goldRow, "BOTTOMLEFT", 0, -14) -- re-anchored every refresh
+
+    local curDurRow, curDurVal = CreateLabelRow(frame, "Duration", MUTED)
+    curDurRow:SetPoint("TOPLEFT", currentRun.header, "BOTTOMLEFT", 0, -2)
+    curRunDurationValue = curDurVal
+
+    local curEarnedRow, curEarnedVal = CreateLabelRow(frame, "Earned here", MUTED)
+    curEarnedRow:SetPoint("TOPLEFT", curDurRow, "BOTTOMLEFT", 0, -2)
+    curRunEarnedValue = curEarnedVal
+
+    currentRun.body = { curDurRow, curEarnedRow }
+    currentRun.bottom = curEarnedRow
+    frame.currentRunSection = currentRun
 
     -- session section
     local session = CreateSection(frame, "This Session")
-    session.header:SetPoint("TOPLEFT", goldRow, "BOTTOMLEFT", 0, -14)
+    session.header:SetPoint("TOPLEFT", currentRun.header, "BOTTOMLEFT", 0, -14) -- re-anchored every refresh
 
     local resetButton = CreateFrame("Button", nil, frame)
     resetButton:SetSize(40, 14)
@@ -248,6 +268,40 @@ local function BuildFrame()
             ticker = nil
         end
     end)
+end
+
+local function LayoutCurrentRun(anchor)
+    local section = frame.currentRunSection
+    local run = Coffer:GetActiveRun()
+
+    if not run then
+        section.header:Hide()
+        for _, row in ipairs(section.body) do
+            row:Hide()
+        end
+        return anchor
+    end
+
+    section.header:ClearAllPoints()
+    section.header:SetPoint("TOPLEFT", anchor, "BOTTOMLEFT", 0, -14)
+    section.header:Show()
+    section.label:SetText(("CURRENT RUN \226\128\148 %s"):format((run.name or "Unknown"):upper()))
+
+    local visible = not section.collapsed
+    for _, row in ipairs(section.body) do
+        row:SetShown(visible)
+    end
+    if not visible then
+        return section.header
+    end
+
+    curRunDurationValue:SetText(Coffer:FormatDuration(time() - run.startTime))
+    local net = run.loot + run.quest + run.vendor - run.spent
+    local color = net >= 0 and GREEN or RED
+    curRunEarnedValue:SetText(Coffer:FormatSigned(net))
+    curRunEarnedValue:SetTextColor(color[1], color[2], color[3])
+
+    return section.bottom
 end
 
 local function SortedItems()
@@ -365,6 +419,10 @@ function Coffer:RefreshUI()
     for _, row in ipairs(frame.sessionSection.body) do
         row:SetShown(not frame.sessionSection.collapsed)
     end
+
+    local afterCurrentRun = LayoutCurrentRun(frame.goldRow)
+    frame.sessionSection.header:ClearAllPoints()
+    frame.sessionSection.header:SetPoint("TOPLEFT", afterCurrentRun, "BOTTOMLEFT", 0, -14)
 
     local afterSession = frame.sessionSection.collapsed and frame.sessionSection.header or frame.sessionSection.bottom
     local afterItems = LayoutItems(afterSession)

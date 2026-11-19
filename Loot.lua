@@ -24,7 +24,16 @@ function Coffer:RecordItemLoot(itemID, count, link)
     end)
 end
 
-Coffer:On("CHAT_MSG_LOOT", function(self, _, message)
+-- In a party/raid, CHAT_MSG_LOOT also fires for OTHER members' loot (e.g. "Jump High
+-- receives loot: [Mote of Unstable Magic]."), not just your own ("You receive loot:
+-- ..."). The event's sender argument identifies who actually looted it; if it's
+-- populated and isn't you, this is someone else's drop and must not be counted.
+Coffer:On("CHAT_MSG_LOOT", function(self, _, message, sender)
+    local playerName = UnitName("player")
+    if sender and sender ~= "" and sender ~= playerName and not sender:find("^" .. playerName .. "%-") then
+        return
+    end
+
     local link = message:match(LINK_PATTERN)
     if not link then return end
     local itemID = tonumber(link:match("item:(%d+)"))

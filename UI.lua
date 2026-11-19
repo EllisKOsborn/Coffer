@@ -21,15 +21,31 @@ local itemRows = {}
 local runRows = {}
 local ticker
 
+-- Deliberately avoids the "BackdropTemplate" XML template: Forever's interface version
+-- (1.60.x) follows Classic's numbering, not modern retail's, and that template's
+-- availability can't be assumed. Built from plain textures instead, which every WoW
+-- client version supports with zero dependency on named templates.
 local function CreateBackdropFrame(parent, name)
-    local f = CreateFrame("Frame", name, parent, "BackdropTemplate")
-    f:SetBackdrop({
-        bgFile = "Interface\\Buttons\\WHITE8x8",
-        edgeFile = "Interface\\Buttons\\WHITE8x8",
-        edgeSize = 1,
-    })
-    f:SetBackdropColor(0.04, 0.04, 0.05, 0.93)
-    f:SetBackdropBorderColor(0.5, 0.39, 0.14, 0.9)
+    local f = CreateFrame("Frame", name, parent)
+
+    local bg = f:CreateTexture(nil, "BACKGROUND")
+    bg:SetAllPoints()
+    bg:SetColorTexture(0.04, 0.04, 0.05, 0.93)
+
+    local function Edge(p1, p2, width, height)
+        local t = f:CreateTexture(nil, "BORDER")
+        t:SetColorTexture(0.5, 0.39, 0.14, 0.9)
+        t:SetPoint(p1)
+        t:SetPoint(p2)
+        if width then t:SetWidth(width) end
+        if height then t:SetHeight(height) end
+        return t
+    end
+    Edge("TOPLEFT", "TOPRIGHT", nil, 1)
+    Edge("BOTTOMLEFT", "BOTTOMRIGHT", nil, 1)
+    Edge("TOPLEFT", "BOTTOMLEFT", 1, nil)
+    Edge("TOPRIGHT", "BOTTOMRIGHT", 1, nil)
+
     return f
 end
 
@@ -152,9 +168,17 @@ local function BuildFrame()
     title:SetPoint("LEFT", icon, "RIGHT", 6, 0)
     title:SetText("Coffer")
 
-    local closeButton = CreateFrame("Button", nil, frame, "UIPanelCloseButton")
-    closeButton:SetSize(20, 20)
+    -- Built manually (no "UIPanelCloseButton" template) for the same reason as
+    -- CreateBackdropFrame above: don't assume a named template exists on this client.
+    local closeButton = CreateFrame("Button", nil, frame)
+    closeButton:SetSize(18, 18)
     closeButton:SetPoint("TOPRIGHT", -4, -4)
+    local closeLabel = closeButton:CreateFontString(nil, "OVERLAY")
+    SetFont(closeLabel, 13, MUTED)
+    closeLabel:SetPoint("CENTER")
+    closeLabel:SetText("x")
+    closeButton:SetScript("OnEnter", function() SetFont(closeLabel, 13, GOLD) end)
+    closeButton:SetScript("OnLeave", function() SetFont(closeLabel, 13, MUTED) end)
     closeButton:SetScript("OnClick", function() frame:Hide() end)
 
     local cursor = frame:CreateTexture(nil, "ARTWORK") -- anchor placeholder
@@ -438,7 +462,12 @@ end
 
 function Coffer:ToggleFrame()
     if not frame then
-        BuildFrame()
+        local ok, err = pcall(BuildFrame)
+        if not ok then
+            print("|cffff0000Coffer failed to build its panel:|r " .. tostring(err))
+            print("|cffff0000Coffer:|r please report this error (and your /coffer debug output) so it can be fixed.")
+            return
+        end
     end
     if frame:IsShown() then
         frame:Hide()

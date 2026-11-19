@@ -29,14 +29,24 @@ worth farming.
 
 ## Install
 
-Copy (or symlink) this folder into your WoW `Interface/AddOns` directory so the addon
-folder is named `Coffer`:
+**Important:** World of Warcraft: Forever has its own, separate install folder —
+`_forever_` — not `_retail_` or `_classic_era_`. An addon dropped into the wrong one
+simply won't be seen by the client; there's no error, it just never loads.
+
+Copy (or symlink) this folder into Forever's AddOns directory so the addon folder is
+named exactly `Coffer`:
 
 ```bash
-cp -r Coffer "/path/to/World of Warcraft/_retail_/Interface/AddOns/Coffer"
+cp -r Coffer "/path/to/World of Warcraft/_forever_/Interface/AddOns/Coffer"
 ```
 
-Then enable "Coffer" on the character-select AddOns screen.
+Then, at the character-select screen, click **AddOns** (bottom left) and make sure
+**Coffer** is checked. If it's unchecked and labeled out of date, tick "Load out of
+date AddOns" too (see the Compatibility note below).
+
+If you downloaded the GitHub ZIP instead of using git, the extracted folder will be
+named `Coffer-main` — rename it to `Coffer` before copying it in; the folder name has
+to match the addon's `.toc` file exactly.
 
 ## Usage
 
@@ -44,6 +54,25 @@ Then enable "Coffer" on the character-select AddOns screen.
 - `/coffer reset` — reset the current session's totals (run history is kept).
 - `/coffer lock` / `/coffer unlock` — lock the panel in place so it stops being
   draggable.
+- `/coffer debug` — prints load/diagnostic info to chat (version, whether
+  SavedVariables and the panel loaded, session/run counts). Useful whenever `/coffer`
+  seems to do nothing — see Troubleshooting below.
+
+## Troubleshooting "`/coffer` does nothing"
+
+1. **Log in and watch the chat window.** On a successful load, Coffer prints
+   `Coffer vX.X.X loaded. Type /coffer to open it...`. If you never see that line at
+   all, the addon isn't loading — it's not a bug in the panel, something's stopping it
+   from starting. Go to step 2.
+2. **If it never loads:** open the AddOns list at character select and check:
+   - The folder is `.../​_forever_/Interface/AddOns/Coffer/` (not `_retail_`, and not
+     nested as `AddOns/Coffer/Coffer/` or left named `Coffer-main`).
+   - "Coffer" is ticked in the list.
+   - It isn't greyed out / flagged out of date — if it is, enable "Load out of date
+     AddOns" (near the bottom of the AddOns list) and relog.
+3. **If it does load** (you saw the chat message) **but `/coffer` still shows
+   nothing:** run `/coffer debug` and send me what it prints — that tells us whether
+   the panel frame is even being built, and we can go from there.
 
 ## How values are classified
 

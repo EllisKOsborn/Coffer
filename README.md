@@ -6,6 +6,13 @@ quest hand-ins, vendor sales, and the estimated value of items still sitting in 
 bags — and keeps a running history of your dungeon runs so you can see what's actually
 worth farming.
 
+![Coffer panel preview](screenshots/panel-preview.png)
+
+> This is a rendered mockup of the panel's actual layout and colors (built straight
+> from `UI.lua`'s structure, not a photoshop), used here to preview the design before
+> installing — **not** a live in-game screenshot. The real in-game font (Friz Quadrata)
+> and exact pixel spacing will look slightly different; numbers shown are sample data.
+
 ## Features
 
 - **Live gold/hour** computed from a session that persists across logout/relog (reset

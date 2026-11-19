@@ -515,6 +515,68 @@ function Coffer:GetPanelGeometry()
     }
 end
 
+-- A dedicated, scrollable, selectable text window for /coffer debug output. Chat
+-- scrollback is unreliable for this: it can be buried by other chat traffic, and
+-- there's no reliable way to know whether you've seen the end of the output or not.
+-- This window always shows the complete text, independent of chat entirely.
+local debugWindow
+local function ShowDebugText(text)
+    if not debugWindow then
+        local f = CreateFrame("Frame", "CofferDebugFrame", UIParent)
+        f:SetSize(520, 420)
+        f:SetPoint("CENTER")
+        f:SetFrameStrata("DIALOG")
+        f:SetMovable(true)
+        f:EnableMouse(true)
+        f:RegisterForDrag("LeftButton")
+        f:SetScript("OnDragStart", f.StartMoving)
+        f:SetScript("OnDragStop", f.StopMovingOrSizing)
+
+        local bg = f:CreateTexture(nil, "BACKGROUND")
+        bg:SetAllPoints()
+        bg:SetColorTexture(0.05, 0.05, 0.06, 0.98)
+
+        local titleText = f:CreateFontString(nil, "OVERLAY")
+        SetFont(titleText, 13, GOLD, "OUTLINE")
+        titleText:SetPoint("TOPLEFT", 12, -10)
+        titleText:SetText("Coffer Debug - select all (Ctrl+A) and copy (Ctrl+C)")
+
+        local closeBtn = CreateFrame("Button", nil, f)
+        closeBtn:SetSize(20, 20)
+        closeBtn:SetPoint("TOPRIGHT", -6, -6)
+        local closeLbl = closeBtn:CreateFontString(nil, "OVERLAY")
+        SetFont(closeLbl, 14, MUTED)
+        closeLbl:SetPoint("CENTER")
+        closeLbl:SetText("x")
+        closeBtn:SetScript("OnClick", function() f:Hide() end)
+
+        local scrollFrame = CreateFrame("ScrollFrame", nil, f)
+        scrollFrame:SetPoint("TOPLEFT", 12, -32)
+        scrollFrame:SetPoint("BOTTOMRIGHT", -12, 12)
+        scrollFrame:EnableMouseWheel(true)
+        scrollFrame:SetScript("OnMouseWheel", function(self, delta)
+            self:SetVerticalScroll(math.max(0, (self:GetVerticalScroll() or 0) - delta * 20))
+        end)
+
+        local editBox = CreateFrame("EditBox", nil, scrollFrame)
+        editBox:SetMultiLine(true)
+        editBox:SetFontObject(ChatFontNormal or GameFontNormal)
+        editBox:SetWidth(480)
+        editBox:SetAutoFocus(false)
+        editBox:SetScript("OnEscapePressed", function() f:Hide() end)
+        scrollFrame:SetScrollChild(editBox)
+
+        f.editBox = editBox
+        debugWindow = f
+    end
+
+    debugWindow.editBox:SetText(text)
+    debugWindow.editBox:HighlightText()
+    debugWindow.editBox:SetFocus()
+    debugWindow:Show()
+end
+Coffer.ShowDebugText = function(self, text) ShowDebugText(text) end
+
 if StaticPopupDialogs then
     StaticPopupDialogs["COFFER_CONFIRM_RESET"] = {
         text = "Reset Coffer's current session? Recent run history is kept.",

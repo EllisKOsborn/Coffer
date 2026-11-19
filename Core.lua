@@ -155,37 +155,61 @@ local function CountKeys(t)
     return n
 end
 
+-- Everything is collected into `lines` (not just print()'d) and the whole body is
+-- wrapped in pcall, then Coffer:ShowDebugText opens a dedicated copyable window with
+-- whatever was collected - plus the crash message, if any - so this command always
+-- produces a complete, capturable report no matter what goes wrong while gathering it.
+-- Chat scrollback alone isn't trustworthy for this: heavy trade/party chat can bury or
+-- obscure later lines with no way to tell whether you've seen the end of the output.
 local function PrintDebug()
-    local build, buildNum, buildDate, tocVersion = GetBuildInfo()
-    print("|cffffd200Coffer debug|r")
-    print("  Addon version: " .. tostring(Coffer.VERSION))
-    print("  Client build: " .. tostring(build) .. "  (interface " .. tostring(tocVersion) .. ")")
-    print("  Coffer.toc declares interface: 16001 - if that doesn't match the line above, update Coffer.toc")
-    print("  SavedVariables loaded: " .. tostring(Coffer.db ~= nil))
-    if Coffer.db then
-        print("  Session started: " .. tostring(Coffer.db.session.startTime ~= nil))
-        print("  Items tracked this session: " .. CountKeys(Coffer.db.session.items))
-        print("  Runs recorded: " .. #Coffer.db.runs)
+    local lines = {}
+    local function out(s)
+        print(s)
+        table.insert(lines, s)
     end
-    local built = Coffer:ForceShowPanel()
-    print("  Panel build+show attempt succeeded: " .. tostring(built))
-    local geo = Coffer:GetPanelGeometry()
-    if geo then
-        print(("  Panel geometry: %.0fx%.0f at (left=%s, top=%s), strata=%s, alpha=%s"):format(
-            geo.width or -1, geo.height or -1, tostring(geo.left), tostring(geo.top), tostring(geo.strata), tostring(geo.alpha)))
-        print("  Panel shown: " .. tostring(geo.shown) .. "   Panel actually visible on screen: " .. tostring(geo.visible))
-        if geo.shown and not geo.visible then
-            print("  |cffff0000Shown is true but visible is false - an ancestor frame is hidden; this shouldn't")
-            print("  happen for a UIParent-attached frame, please report this.|r")
-        elseif geo.width and geo.width > 0 and (not geo.height or geo.height <= 1) then
-            print("  |cffff0000Height looks collapsed (<=1px) - the panel exists but has no visible content area.|r")
+
+    local ok, err = pcall(function()
+        local build, buildNum, buildDate, tocVersion = GetBuildInfo()
+        out("Coffer debug")
+        out("  Addon version: " .. tostring(Coffer.VERSION))
+        out("  Client build: " .. tostring(build) .. "  (interface " .. tostring(tocVersion) .. ")")
+        out("  Coffer.toc declares interface: 16001 - if that doesn't match the line above, update Coffer.toc")
+        out("  SavedVariables loaded: " .. tostring(Coffer.db ~= nil))
+        if Coffer.db then
+            out("  Session started: " .. tostring(Coffer.db.session.startTime ~= nil))
+            out("  Items tracked this session: " .. CountKeys(Coffer.db.session.items))
+            out("  Runs recorded: " .. #Coffer.db.runs)
         end
-    else
-        print("  |cffff0000Panel frame could not be built at all - see the red error above, if any.|r")
+        local built = Coffer:ForceShowPanel()
+        out("  Panel build+show attempt succeeded: " .. tostring(built))
+        local geo = Coffer:GetPanelGeometry()
+        if geo then
+            out(("  Panel geometry: %.0fx%.0f at (left=%s, top=%s), strata=%s, alpha=%s"):format(
+                geo.width or -1, geo.height or -1, tostring(geo.left), tostring(geo.top), tostring(geo.strata), tostring(geo.alpha)))
+            out("  Panel shown: " .. tostring(geo.shown) .. "   Panel actually visible on screen: " .. tostring(geo.visible))
+            if geo.shown and not geo.visible then
+                out("  NOTE: shown is true but visible is false - an ancestor frame is hidden; shouldn't happen for a UIParent-attached frame.")
+            elseif geo.width and geo.width > 0 and (not geo.height or geo.height <= 1) then
+                out("  NOTE: height looks collapsed (<=1px) - the panel exists but has no visible content area.")
+            end
+        else
+            out("  Panel frame could not be built at all.")
+        end
+        out("")
+        out("END OF DEBUG OUTPUT (if you see this line, nothing crashed while gathering it)")
+    end)
+
+    if not ok then
+        out("")
+        out("CRASHED while gathering debug info: " .. tostring(err))
     end
-    print("  If you see this message at all, Coffer IS loaded and running. If a panel still")
-    print("  isn't visible on screen now (this command just tried to force it open), please")
-    print("  send me this entire debug output, including any red error lines above it.")
+
+    local fullText = table.concat(lines, "\n")
+    if Coffer.ShowDebugText then
+        Coffer:ShowDebugText(fullText)
+    else
+        print("|cffff0000Coffer:|r couldn't open the debug window (UI not loaded) - see the printed lines above instead.")
+    end
 end
 
 SLASH_COFFER1 = "/coffer"

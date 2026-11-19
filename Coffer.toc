@@ -1,0 +1,17 @@
+# Interface number for World of Warcraft: Forever (patch 1.60.x), which runs on the
+# same client as modern retail. If Coffer shows as out-of-date, check your client's
+# real interface number in-game with: /run print(select(4, GetBuildInfo()))
+# and update the line below to match.
+## Interface: 16001
+## Title: |cffffd200Coffer|r
+## Notes: The most accurate gold tracker for World of Warcraft: Forever. Tracks raw gold loot, item drops, quest hand-ins and vendor sales per dungeon run, with full session and run history.
+## Version: 0.1.0
+## SavedVariablesPerCharacter: CofferDB
+## IconTexture: Interface\Icons\INV_Misc_Coin_01
+
+Core.lua
+ItemValue.lua
+Money.lua
+Loot.lua
+Runs.lua
+UI.lua

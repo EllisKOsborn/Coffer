@@ -1,0 +1,11 @@
+{
+  "name": "coffer-tests",
+  "private": true,
+  "description": "Runs Coffer's Lua files through fengari (a Lua VM in JS) to catch syntax and runtime errors outside the game, since there's no WoW client available in CI/dev environments.",
+  "scripts": {
+    "test": "node syntax-check.js ../Core.lua ../ItemValue.lua ../Money.lua ../Loot.lua ../Runs.lua ../UI.lua && node run.js mock.lua .."
+  },
+  "dependencies": {
+    "fengari": "^0.1.5"
+  }
+}

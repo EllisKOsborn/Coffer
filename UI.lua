@@ -228,8 +228,11 @@ local function BuildFrame()
     resetButton:SetScript("OnEnter", function() SetFont(resetText, 10, GOLD) end)
     resetButton:SetScript("OnLeave", function() SetFont(resetText, 10, MUTED) end)
     resetButton:SetScript("OnClick", function()
-        StaticPopup_Show and StaticPopup_Show("COFFER_CONFIRM_RESET")
-        if not StaticPopup_Show then Coffer:ResetSession() end
+        if StaticPopup_Show then
+            StaticPopup_Show("COFFER_CONFIRM_RESET")
+        else
+            Coffer:ResetSession()
+        end
     end)
 
     local durRow, durVal = CreateLabelRow(frame, "Duration", MUTED)

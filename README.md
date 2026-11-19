@@ -85,7 +85,28 @@ WoW doesn't tell addons *why* your money changed, so Coffer infers it:
 - Any decrease → **spent** (repairs, purchases, training, AH deposits, ...).
 
 Item drops are parsed directly out of the item hyperlink in `CHAT_MSG_LOOT` (not the
-surrounding sentence), so detection works regardless of client locale.
+surrounding sentence), so detection works regardless of client locale. The sender of
+that event is also checked against your own name, so other party/raid members' loot
+(which fires the same event) is never counted as yours.
+
+## Testing without a WoW client
+
+`tests/` runs every `.lua` file through [fengari](https://fengari.io) (a Lua VM
+implemented in JS) outside the game: first a real syntax check on each file, then a
+full simulated playthrough (load → `/coffer` → `/coffer debug` → loot an item → have a
+party member loot something that must be ignored → turn in a quest → enter and leave a
+dungeon) against a mock of the WoW API, asserting the tracked numbers come out right at
+each step. It's not a substitute for actually playing with the addon loaded, but it
+catches load-time syntax errors and broken control flow before they ever reach a real
+client - which is exactly the kind of bug (a single invalid statement that silently
+killed all of `UI.lua`) that shipped undetected for several versions before this
+existed.
+
+```bash
+cd tests
+npm install
+npm test
+```
 
 ## Compatibility note
 

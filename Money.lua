@@ -1,120 +1,172 @@
 local addonName, Coffer = ...
 
-local lastMoney
-local merchantOpen = false
+-- ---------------------------------------------------------------------------
+-- Session time: online seconds only
+-- ---------------------------------------------------------------------------
 
--- Loot gold is parsed directly from CHAT_MSG_MONEY using Blizzard's own localized
--- "%d Gold"/"%d Silver"/"%d Copper" templates (GOLD_AMOUNT etc.), the same technique
--- proven production addons (e.g. KiwiFarm) use - this event fires specifically for
--- money looted, so there's no need to infer "was this loot?" from timing/context at
--- all, unlike a PLAYER_MONEY delta.
-local GOLD_PATTERN = _G.GOLD_AMOUNT and (_G.GOLD_AMOUNT:gsub("%%d", "(%%d+)"))
-local SILVER_PATTERN = _G.SILVER_AMOUNT and (_G.SILVER_AMOUNT:gsub("%%d", "(%%d+)"))
-local COPPER_PATTERN = _G.COPPER_AMOUNT and (_G.COPPER_AMOUNT:gsub("%%d", "(%%d+)"))
+-- session.duration holds online time banked at the last logout/reload; onlineSince is
+-- when this login started. Time spent logged off never counts, so gold per hour isn't
+-- diluted by sleeping between farming sessions (KiwiFarm times sessions the same way).
+local onlineSince
 
-local function ParseLootedMoney(message)
-    local gold = GOLD_PATTERN and tonumber(message:match(GOLD_PATTERN)) or 0
-    local silver = SILVER_PATTERN and tonumber(message:match(SILVER_PATTERN)) or 0
-    local copper = COPPER_PATTERN and tonumber(message:match(COPPER_PATTERN)) or 0
+local function BankOnlineTime()
+    if onlineSince and Coffer.db then
+        local session = Coffer.db.session
+        session.duration = (session.duration or 0) + math.max(0, time() - onlineSince)
+        onlineSince = time()
+    end
+end
+
+function Coffer:GetSessionDuration()
+    if not self.db then return 0 end
+    return (self.db.session.duration or 0) + (onlineSince and math.max(0, time() - onlineSince) or 0)
+end
+
+-- ---------------------------------------------------------------------------
+-- Totals
+-- ---------------------------------------------------------------------------
+-- Same convention as both reference addons (checked against the Fojicore panel's own
+-- numbers: (331 earned + 233 items) / 51h15m = 11.0 gold/hour, and 331 + 233 - 374 =
+-- its 190-191 total):
+--   earned   = looted gold + quest gold
+--   items    = value of items looted
+--   income   = earned + items                 -> gold per hour
+--   total    = income - spent
+-- Gold from selling looted items to a vendor is NOT income - its value was already
+-- counted as an item when it was looted. It's recorded separately (session.vendor) for
+-- information only.
+
+function Coffer:GetSessionEarned()
+    local session = self.db.session
+    return session.loot + session.quest
+end
+
+function Coffer:GetSessionIncome()
+    return self:GetSessionEarned() + self:GetSessionItemsValue()
+end
+
+function Coffer:GetSessionNet()
+    return self:GetSessionIncome() - self.db.session.spent
+end
+
+-- nil for the first minute, when a rate would be meaningless (one early drop would
+-- read as thousands of gold per hour).
+function Coffer:GetGoldPerHour()
+    local seconds = self:GetSessionDuration()
+    if seconds < 60 then return nil end
+    return self:GetSessionIncome() / (seconds / 3600)
+end
+
+function Coffer:ResetSession()
+    local session = self.db.session
+    session.loot, session.quest, session.vendor, session.spent, session.kills = 0, 0, 0, 0, 0
+    session.duration = 0
+    wipe(session.items)
+    onlineSince = time()
+    self:Changed()
+end
+
+-- ---------------------------------------------------------------------------
+-- Income
+-- ---------------------------------------------------------------------------
+
+-- Looted gold, parsed from CHAT_MSG_MONEY using Blizzard's own localized
+-- "%d Gold"/"%d Silver"/"%d Copper" templates (KiwiFarm's technique). This event fires
+-- only for your own money - "You loot ..." and "Your share of the loot is ..." alike.
+local GOLD = Coffer:PatternFromTemplate(GOLD_AMOUNT)
+local SILVER = Coffer:PatternFromTemplate(SILVER_AMOUNT)
+local COPPER = Coffer:PatternFromTemplate(COPPER_AMOUNT)
+
+function Coffer:ParseMoney(message)
+    -- Drop parentheticals like "(5 Silver deposited to guild bank)" so a guild tax
+    -- amount can't be read as part of what you looted.
+    message = message:gsub("%b()", "")
+    local gold = GOLD and tonumber(message:match(GOLD)) or 0
+    local silver = SILVER and tonumber(message:match(SILVER)) or 0
+    local copper = COPPER and tonumber(message:match(COPPER)) or 0
     return gold * 10000 + silver * 100 + copper
 end
 
 Coffer:On("CHAT_MSG_MONEY", function(self, _, message)
-    local amount = ParseLootedMoney(message)
-    if amount <= 0 or not self.db then return end
-    local session = self.db.session
-    session.loot = session.loot + amount
+    if not self.db or not self:Readable(message) or type(message) ~= "string" then return end
+    local amount = self:ParseMoney(message)
+    if amount <= 0 then return end
+    self.db.session.loot = self.db.session.loot + amount
     self:TrackRunIncome("loot", amount)
-    self:NotifyMoneyChanged()
+    self:Changed()
 end)
 
--- moneyReward is given directly by the event - no need to infer it from a money delta.
-Coffer:On("QUEST_TURNED_IN", function(self, _, questID, xpReward, moneyReward)
-    if not moneyReward or moneyReward <= 0 or not self.db then return end
-    local session = self.db.session
-    session.quest = session.quest + moneyReward
+-- The reward comes straight from the event, no inference needed.
+Coffer:On("QUEST_TURNED_IN", function(self, _, _, _, moneyReward)
+    if not self.db or not self:Readable(moneyReward) or type(moneyReward) ~= "number" or moneyReward <= 0 then return end
+    self.db.session.quest = self.db.session.quest + moneyReward
     self:TrackRunIncome("quest", moneyReward)
-    self:NotifyMoneyChanged()
+    self:Changed()
 end)
 
-Coffer:On("MERCHANT_SHOW", function() merchantOpen = true end)
-Coffer:On("MERCHANT_CLOSED", function() merchantOpen = false end)
+-- ---------------------------------------------------------------------------
+-- Vendor sales and spending (PLAYER_MONEY)
+-- ---------------------------------------------------------------------------
 
--- PLAYER_MONEY fires for every currency change, including the loot/quest gold already
--- captured precisely above - counting those again here would double them. What's left
--- for this handler: vendor sales (a positive delta while the merchant window is open)
--- and spending (any decrease - repairs, purchases, training, AH deposits, ...), neither
--- of which has its own dedicated, cleanly-parseable chat event.
+-- Which money-moving windows are open. Classic events and the modern interaction
+-- manager both report these; Forever may send either, so both are listened to.
+local open = {}
+
+local function Track(showEvent, hideEvent, kind)
+    Coffer:On(showEvent, function() open[kind] = true end)
+    Coffer:On(hideEvent, function() open[kind] = nil end)
+end
+Track("MERCHANT_SHOW", "MERCHANT_CLOSED", "merchant")
+Track("MAIL_SHOW", "MAIL_CLOSED", "mail")
+Track("TRADE_SHOW", "TRADE_CLOSED", "trade")
+
+local interactionKinds = {}
+local PIT = Enum and Enum.PlayerInteractionType
+if PIT then
+    if PIT.Merchant then interactionKinds[PIT.Merchant] = "merchant" end
+    if PIT.MailInfo then interactionKinds[PIT.MailInfo] = "mail" end
+    if PIT.TradePartner then interactionKinds[PIT.TradePartner] = "trade" end
+end
+Coffer:On("PLAYER_INTERACTION_MANAGER_FRAME_SHOW", function(_, _, kind)
+    if interactionKinds[kind] then open[interactionKinds[kind]] = true end
+end)
+Coffer:On("PLAYER_INTERACTION_MANAGER_FRAME_HIDE", function(_, _, kind)
+    if interactionKinds[kind] then open[interactionKinds[kind]] = nil end
+end)
+
+-- PLAYER_MONEY fires for every balance change, including the loot and quest gold
+-- already counted above. Left for it to classify:
+--   increase at a merchant   -> vendor sale (informational, not income - see Totals)
+--   other increases          -> already counted, or not farming income (mail, trade)
+--   decrease at mail/trade   -> moving gold to an alt or another player, not spending
+--   any other decrease       -> spent (repairs, purchases, training, AH, flights, ...)
+local lastMoney
+
 Coffer:On("PLAYER_MONEY", function(self)
     local current = GetMoney()
-    if lastMoney == nil then
+    if lastMoney == nil or not self.db then
         lastMoney = current
         return
     end
     local delta = current - lastMoney
     lastMoney = current
-    if delta == 0 or not self.db then return end
-
-    local session = self.db.session
     if delta > 0 then
-        if merchantOpen then
-            session.vendor = session.vendor + delta
-            self:TrackRunIncome("vendor", delta)
-            self:NotifyMoneyChanged()
+        if open.merchant then
+            self.db.session.vendor = self.db.session.vendor + delta
+            self:Changed()
         end
-        -- else: already accounted for via CHAT_MSG_MONEY/QUEST_TURNED_IN above.
-    else
-        session.spent = session.spent - delta
+    elseif delta < 0 and not open.mail and not open.trade then
+        self.db.session.spent = self.db.session.spent - delta
         self:TrackRunIncome("spent", -delta)
-        self:NotifyMoneyChanged()
+        self:Changed()
     end
 end)
 
 Coffer:OnReady(function()
+    onlineSince = time()
     lastMoney = GetMoney()
 end)
 
-function Coffer:GetSessionDuration()
-    if not self.db or not self.db.session.startTime then return 0 end
-    return time() - self.db.session.startTime
-end
-
-function Coffer:GetGoldPerHour()
-    local elapsed = self:GetSessionDuration()
-    if elapsed <= 0 then return 0 end
-    local session = self.db.session
-    local net = session.loot + session.quest + session.vendor - session.spent
-    return net / (elapsed / 3600)
-end
-
-function Coffer:GetSessionEarned()
-    local session = self.db.session
-    return session.loot + session.quest + session.vendor
-end
-
-function Coffer:GetSessionNet()
-    local session = self.db.session
-    return self:GetSessionEarned() - session.spent
-end
-
--- Total estimated value of items looted this session (whatever their value source
--- resolved to - auction or vendor). Shown alongside the realized-gold figures above as
--- separate, informational "potential value still sitting in your bags" - not summed
--- into Earned/Total, since actually selling an item is already captured as vendor gold
--- when it happens, and these two would otherwise double-count.
-function Coffer:GetSessionItemsValue()
-    if not self.db then return 0 end
-    local total = 0
-    for _, entry in pairs(self.db.session.items) do
-        total = total + (entry.value or 0) * entry.count
-    end
-    return total
-end
-
-function Coffer:ResetSession()
-    local session = self.db.session
-    session.startTime = time()
-    session.loot, session.quest, session.vendor, session.spent = 0, 0, 0, 0
-    wipe(session.items)
-    self:NotifySessionReset()
-end
+Coffer:On("PLAYER_LOGOUT", function()
+    BankOnlineTime()
+end)

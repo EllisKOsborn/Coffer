@@ -1,27 +1,31 @@
 local addonName, Coffer = ...
 _G.Coffer = Coffer
 
--- Never let this throw: if neither API exists, Coffer.VERSION just stays "dev" instead
--- of a hard Lua error on load that would silently kill every file after this one,
--- including the slash command registration at the bottom of this file.
-Coffer.VERSION = "dev"
-if C_AddOns and C_AddOns.GetAddOnMetadata then
-    Coffer.VERSION = C_AddOns.GetAddOnMetadata(addonName, "Version") or Coffer.VERSION
-elseif GetAddOnMetadata then
-    Coffer.VERSION = GetAddOnMetadata(addonName, "Version") or Coffer.VERSION
-end
+local GetAddOnMetadata = (C_AddOns and C_AddOns.GetAddOnMetadata) or GetAddOnMetadata
+Coffer.VERSION = (GetAddOnMetadata and GetAddOnMetadata(addonName, "Version")) or "dev"
 
--- session: the running totals since the player last reset tracking (persists across logout/relog)
--- runs: finished dungeon runs, most recent first
--- settings: UI state
+-- ---------------------------------------------------------------------------
+-- Saved data
+-- ---------------------------------------------------------------------------
+
+local SCHEMA = 2
+
+-- CofferDB is per character: session totals, run history, panel settings.
+-- session.duration is *online* seconds only (banked on logout/reload), so time spent
+-- logged off never dilutes gold per hour.
 local DEFAULTS = {
-    session = { startTime = nil, loot = 0, quest = 0, vendor = 0, spent = 0, items = {} },
+    schema = SCHEMA,
+    session = { duration = 0, loot = 0, quest = 0, vendor = 0, spent = 0, kills = 0, items = {} },
     runs = {},
-    settings = { point = nil, locked = false },
+    settings = { locked = false, hidden = false, valuation = "auction", collapsed = {} },
 }
 
+-- CofferAccountDB is account-wide: instance lockouts are per account under Classic
+-- rules, so alts must share the same counter.
+local ACCOUNT_DEFAULTS = { lockouts = {} }
+
 local function ApplyDefaults(defaults, target)
-    target = target or {}
+    if type(target) ~= "table" then target = {} end
     for key, value in pairs(defaults) do
         if type(value) == "table" then
             target[key] = ApplyDefaults(value, target[key])
@@ -32,43 +36,77 @@ local function ApplyDefaults(defaults, target)
     return target
 end
 
-local eventFrame = CreateFrame("Frame")
-Coffer.handlers = {}
-
-function Coffer:On(event, fn)
-    self.handlers[event] = self.handlers[event] or {}
-    table.insert(self.handlers[event], fn)
-    eventFrame:RegisterEvent(event)
+-- Schema 1 timed sessions from a wall-clock start (offline time included) and counted
+-- vendor sales as income; neither carries over meaningfully, so that session is
+-- restarted. Run history is kept.
+local function Migrate(db)
+    if type(db) == "table" and (db.schema or 1) < SCHEMA then
+        db.session = nil
+        db.schema = SCHEMA
+        Coffer.migratedSession = true
+    end
 end
 
+-- ---------------------------------------------------------------------------
+-- Events
+-- ---------------------------------------------------------------------------
+
+local eventFrame = CreateFrame("Frame")
+Coffer.handlers = {}
+Coffer.unsupportedEvents = {}
+
+-- Registers fn for event. Returns false if this client doesn't know the event (e.g.
+-- COMBAT_LOG_EVENT_UNFILTERED, which addons may not register on Midnight-era clients)
+-- instead of letting RegisterEvent's error abort the whole file.
+function Coffer:On(event, fn)
+    local list = self.handlers[event]
+    if not list then
+        list = {}
+        self.handlers[event] = list
+        if not pcall(eventFrame.RegisterEvent, eventFrame, event) then
+            self.unsupportedEvents[event] = true
+        end
+    end
+    list[#list + 1] = fn
+    return not self.unsupportedEvents[event]
+end
+
+local reportedErrors = {}
+
+-- Prints each distinct error once, so a broken handler can't fail silently or spam.
+function Coffer:ReportError(context, err)
+    local key = tostring(context) .. ":" .. tostring(err)
+    if reportedErrors[key] then return end
+    reportedErrors[key] = true
+    print(("|cffff5555Coffer error (%s):|r %s"):format(tostring(context), tostring(err)))
+end
+
+-- Each handler runs isolated: one failing handler can't stop the others for the same
+-- event (an item-pricing error must never stop gold being counted).
 eventFrame:SetScript("OnEvent", function(_, event, ...)
     local list = Coffer.handlers[event]
     if not list then return end
-    for _, fn in ipairs(list) do
-        fn(Coffer, event, ...)
+    for i = 1, #list do
+        local ok, err = pcall(list[i], Coffer, event, ...)
+        if not ok then
+            Coffer:ReportError(event, err)
+        end
     end
 end)
 
-Coffer.callbacks = {}
-
-function Coffer:RegisterCallback(name, fn)
-    self.callbacks[name] = self.callbacks[name] or {}
-    table.insert(self.callbacks[name], fn)
+-- Data changed: refresh the panel once on the next frame, however many changes landed
+-- in this one (a loot burst can fire a dozen events back to back).
+local refreshQueued = false
+function Coffer:Changed()
+    if refreshQueued then return end
+    refreshQueued = true
+    C_Timer.After(0, function()
+        refreshQueued = false
+        if Coffer.RefreshUI then
+            Coffer:RefreshUI()
+        end
+    end)
 end
-
-local function Fire(name, ...)
-    local list = Coffer.callbacks[name]
-    if not list then return end
-    for _, fn in ipairs(list) do
-        fn(...)
-    end
-end
-
-function Coffer:NotifyMoneyChanged() Fire("MoneyChanged") end
-function Coffer:NotifyItemsChanged() Fire("ItemsChanged") end
-function Coffer:NotifyRunsChanged() Fire("RunsChanged") end
-function Coffer:NotifyActiveRunChanged() Fire("ActiveRunChanged") end
-function Coffer:NotifySessionReset() Fire("SessionReset") end
 
 Coffer.readyCallbacks = {}
 
@@ -82,82 +120,83 @@ end
 
 Coffer:On("ADDON_LOADED", function(self, _, loadedName)
     if loadedName ~= addonName then return end
+    Migrate(CofferDB)
     CofferDB = ApplyDefaults(DEFAULTS, CofferDB)
+    CofferAccountDB = ApplyDefaults(ACCOUNT_DEFAULTS, CofferAccountDB)
     self.db = CofferDB
-    if not self.db.session.startTime then
-        self.db.session.startTime = time()
-    end
+    self.account = CofferAccountDB
+
     for _, fn in ipairs(self.readyCallbacks) do
-        fn(self)
+        local ok, err = pcall(fn, self)
+        if not ok then self:ReportError("startup", err) end
     end
     self.readyCallbacks = {}
 
-    -- A visible sign the addon actually loaded at all. If you don't see this line in
-    -- chat after logging in, Coffer never loaded (wrong AddOns folder, addon unchecked
-    -- at character select, or it's flagged out-of-date) — that's a different problem
-    -- than anything inside the addon itself. Run /coffer debug for more detail.
-    print(("|cffffd200Coffer|r v%s loaded. Type /coffer to open it, or /coffer debug if something looks wrong."):format(self.VERSION))
+    print(("|cffffd200Coffer|r v%s loaded. |cffaaaaaa/coffer to toggle, /coffer help for options.|r"):format(self.VERSION))
+    if self.migratedSession then
+        print("|cffffd200Coffer:|r session restarted for the new online-time tracking (run history kept).")
+    end
 end)
 
 -- ---------------------------------------------------------------------------
--- Formatting helpers
+-- Formatting
 -- ---------------------------------------------------------------------------
 
+local COIN = {
+    gold = "|TInterface\\MoneyFrame\\UI-GoldIcon:12:12:2:0|t",
+    silver = "|TInterface\\MoneyFrame\\UI-SilverIcon:12:12:2:0|t",
+    copper = "|TInterface\\MoneyFrame\\UI-CopperIcon:12:12:2:0|t",
+}
+
+local function Round(n)
+    return math.floor(math.abs(n or 0) + 0.5)
+end
+
+function Coffer:FormatNumber(n)
+    local s = tostring(math.floor(n or 0)):reverse():gsub("(%d%d%d)", "%1,"):reverse()
+    return (s:gsub("^,", ""))
+end
+
+-- Full precision with coin icons ("1,245g 32s 10c"); built by hand rather than with
+-- GetCoinTextureString, which doesn't exist as a global on Forever.
 function Coffer:FormatMoney(copper)
-    copper = math.floor(math.abs(copper or 0))
-    if GetCoinTextureString then
-        return GetCoinTextureString(copper)
-    end
+    copper = Round(copper)
     local gold = math.floor(copper / 10000)
-    local silver = math.floor((copper % 10000) / 100)
+    local silver = math.floor(copper % 10000 / 100)
     local bronze = copper % 100
-    return string.format("%dg %ds %dc", gold, silver, bronze)
+    local parts = {}
+    if gold > 0 then parts[#parts + 1] = self:FormatNumber(gold) .. COIN.gold end
+    if silver > 0 then parts[#parts + 1] = silver .. COIN.silver end
+    if bronze > 0 or #parts == 0 then parts[#parts + 1] = bronze .. COIN.copper end
+    return table.concat(parts, " ")
 end
 
-function Coffer:FormatGold(copper)
-    return math.floor(math.abs(copper or 0) / 10000)
+-- Just the largest unit ("331g", "9s", "40c"), the way the reference panel shows row
+-- values. Below 1 gold it switches unit instead of rounding to a misleading "0g".
+function Coffer:FormatShort(copper)
+    copper = Round(copper)
+    if copper == 0 then return "-" end
+    if copper >= 10000 then
+        return self:FormatNumber(math.floor(copper / 10000)) .. COIN.gold
+    elseif copper >= 100 then
+        return math.floor(copper / 100) .. COIN.silver
+    end
+    return copper .. COIN.copper
 end
 
-function Coffer:FormatSigned(copper)
-    copper = copper or 0
-    local sign = copper < 0 and "-" or "+"
-    return sign .. self:FormatGold(copper)
-end
-
--- Like FormatSigned, but at full silver/copper precision instead of rounding down to
--- whole gold. Used anywhere a single dungeon run's worth of money is shown: a run that
--- only dropped a few silver would otherwise always display as a misleading "+0".
-function Coffer:FormatSignedMoney(copper)
-    copper = copper or 0
-    local sign = copper < 0 and "-" or "+"
-    return sign .. self:FormatMoney(copper)
-end
-
--- A small embedded gold-coin icon (the same texture GetCoinTextureString uses),
--- appended after a whole-gold amount. Used for the bigger aggregate numbers (gold/hour,
--- session totals, item values) where showing a coin icon per amount - as in the
--- reference design - matters more than silver/copper precision.
-local GOLD_COIN_ICON = "|TInterface\\MoneyFrame\\UI-GoldIcon:12:12:2:0|t"
-
-function Coffer:FormatGoldIcon(copper)
-    return self:FormatGold(copper) .. " " .. GOLD_COIN_ICON
-end
-
-function Coffer:FormatSignedGoldIcon(copper)
-    copper = copper or 0
-    local sign = copper < 0 and "-" or "+"
-    return sign .. self:FormatGold(copper) .. " " .. GOLD_COIN_ICON
+function Coffer:FormatSignedShort(copper)
+    if Round(copper) == 0 then return "-" end
+    return ((copper or 0) < 0 and "-" or "+") .. self:FormatShort(copper)
 end
 
 function Coffer:FormatDuration(seconds)
-    seconds = math.floor(seconds or 0)
+    seconds = math.max(0, math.floor(seconds or 0))
     local hours = math.floor(seconds / 3600)
-    local minutes = math.floor((seconds % 3600) / 60)
+    local minutes = math.floor(seconds % 3600 / 60)
     if hours > 0 then
-        return string.format("%dh %02dm", hours, minutes)
+        return ("%dh %02dm"):format(hours, minutes)
     end
-    local secs = seconds % 60
-    return string.format("%dm %02ds", minutes, secs)
+    return ("%dm %02ds"):format(minutes, seconds % 60)
 end
 
 function Coffer:GetQualityColor(quality)
@@ -174,111 +213,104 @@ end
 
 local function CountKeys(t)
     local n = 0
-    for _ in pairs(t) do
-        n = n + 1
-    end
+    for _ in pairs(t or {}) do n = n + 1 end
     return n
 end
 
--- Everything is collected into `lines` (not just print()'d) and the whole body is
--- wrapped in pcall, then Coffer:ShowDebugText opens a dedicated copyable window with
--- whatever was collected - plus the crash message, if any - so this command always
--- produces a complete, capturable report no matter what goes wrong while gathering it.
--- Chat scrollback alone isn't trustworthy for this: heavy trade/party chat can bury or
--- obscure later lines with no way to tell whether you've seen the end of the output.
+-- Collected into a dedicated copyable window (not just chat, which heavy trade/party
+-- traffic can bury) and pcall-wrapped, so it always produces a complete report.
 local function PrintDebug()
     local lines = {}
-    local function out(s)
-        print(s)
-        table.insert(lines, s)
-    end
+    local function out(s) lines[#lines + 1] = s end
 
     local ok, err = pcall(function()
-        local build, buildNum, buildDate, tocVersion = GetBuildInfo()
-        out("Coffer debug")
-        out("  Addon version: " .. tostring(Coffer.VERSION))
-        out("  Client build: " .. tostring(build) .. "  (interface " .. tostring(tocVersion) .. ")")
-        out("  Coffer.toc declares interface: 16001 - if that doesn't match the line above, update Coffer.toc")
-        out("  SavedVariables loaded: " .. tostring(Coffer.db ~= nil))
+        local build, _, _, tocVersion = GetBuildInfo()
+        out("Coffer " .. tostring(Coffer.VERSION))
+        out("Client " .. tostring(build) .. " (interface " .. tostring(tocVersion) .. ")")
+        out("")
+        out("API: GetItemInfo via " .. ((C_Item and C_Item.GetItemInfo) and "C_Item" or (GetItemInfo and "global" or "MISSING")))
+        out("API: secret values " .. (canaccessvalue and "present (guarded)" or "not used by this client"))
+        local missing = {}
+        for event in pairs(Coffer.unsupportedEvents) do missing[#missing + 1] = event end
+        table.sort(missing)
+        out("Events this client doesn't support: " .. (#missing > 0 and table.concat(missing, ", ") or "none"))
+        out("")
         if Coffer.db then
-            out("  Session started: " .. tostring(Coffer.db.session.startTime ~= nil))
-            out("  Items tracked this session: " .. CountKeys(Coffer.db.session.items))
-            out("  Runs recorded: " .. #Coffer.db.runs)
+            local s = Coffer.db.session
+            out("Session online time: " .. Coffer:FormatDuration(Coffer:GetSessionDuration()))
+            out(("Loot %d  Quest %d  Items %d  Spent %d  Vendor %d  (copper)"):format(
+                s.loot, s.quest, Coffer:GetSessionItemsValue(), s.spent, s.vendor))
+            out("Distinct items: " .. CountKeys(s.items) .. "   Kills: " .. s.kills)
+            out("Item valuation: " .. Coffer.db.settings.valuation)
+            out("Runs recorded: " .. #Coffer.db.runs .. "   Active run: " .. tostring(Coffer.db.activeRun and Coffer.db.activeRun.name))
         end
-        local built = Coffer:ForceShowPanel()
-        out("  Panel build+show attempt succeeded: " .. tostring(built))
-        local geo = Coffer:GetPanelGeometry()
-        if geo then
-            out(("  Panel geometry: %.0fx%.0f, strata=%s, alpha=%s"):format(
-                geo.width or -1, geo.height or -1, tostring(geo.strata), tostring(geo.alpha)))
-            out("  Panel shown: " .. tostring(geo.shown) .. "   Panel actually visible on screen: " .. tostring(geo.visible))
-            out("  (on-screen position left=" .. tostring(geo.left) .. " top=" .. tostring(geo.top) ..
-                " - 'nil' here is a separate, harmless WoW quirk about reading geometry back into")
-            out("  Lua, not an indication the panel isn't actually drawn at the right place on screen)")
-            if geo.shown and not geo.visible then
-                out("  NOTE: shown is true but visible is false - an ancestor frame is hidden; shouldn't happen for a UIParent-attached frame.")
-            elseif geo.width and geo.width > 0 and (not geo.height or geo.height <= 1) then
-                out("  NOTE: height looks collapsed (<=1px) - the panel exists but has no visible content area. This is the bug that was just fixed by computing height arithmetically instead of measuring it - if you still see this, something is still wrong.")
-            end
-        else
-            out("  Panel frame could not be built at all.")
+        if Coffer.GetLockoutStatus then
+            local st = Coffer:GetLockoutStatus()
+            out(("Instances: %d/%d this hour, %d/%d today"):format(st.hour, st.hourLimit, st.day, st.dayLimit))
         end
         out("")
-        out("END OF DEBUG OUTPUT (if you see this line, nothing crashed while gathering it)")
+        local built = Coffer:ForceShowPanel()
+        local geo = Coffer:GetPanelGeometry()
+        out("Panel built: " .. tostring(built) .. (geo and ("   size %.0fx%.0f   shown %s"):format(geo.width or -1, geo.height or -1, tostring(geo.shown)) or ""))
+        out("")
+        out("END OF DEBUG OUTPUT")
     end)
-
     if not ok then
         out("")
         out("CRASHED while gathering debug info: " .. tostring(err))
     end
 
-    local fullText = table.concat(lines, "\n")
+    local text = table.concat(lines, "\n")
     if Coffer.ShowDebugText then
-        Coffer:ShowDebugText(fullText)
-
-        -- Height is now computed arithmetically and set synchronously (see UI.lua), so
-        -- it should already be correct above, immediately. This re-check is just a
-        -- belt-and-suspenders confirmation a moment later. left/top are deliberately
-        -- NOT part of the "healthy" check: they reflect a separate, harmless WoW quirk
-        -- about reading resolved screen position back into Lua, not whether the panel
-        -- is actually drawn in the right place (the engine renders it regardless).
-        C_Timer.After(0.3, function()
-            local geo = Coffer:GetPanelGeometry()
-            local extra = "\n\n(re-checked 0.3s later)\n"
-            if geo then
-                extra = extra .. ("  Panel geometry: %.0fx%.0f\n"):format(geo.width or -1, geo.height or -1)
-                extra = extra .. "  Panel shown: " .. tostring(geo.shown) .. "   visible: " .. tostring(geo.visible)
-                if geo.height and geo.height > 1 then
-                    extra = extra .. "\n  Height looks healthy. If you still don't see the panel on screen, it may be"
-                    extra = extra .. "\n  positioned off your visible screen area, or behind another window."
-                else
-                    extra = extra .. "\n  Height STILL looks collapsed - this needs more investigation, please report it."
-                end
-            else
-                extra = extra .. "  Panel frame no longer exists."
-            end
-            Coffer:ShowDebugText(fullText .. extra)
-        end)
+        Coffer:ShowDebugText(text)
     else
-        print("|cffff0000Coffer:|r couldn't open the debug window (UI not loaded) - see the printed lines above instead.")
+        print(text)
     end
+end
+
+local function Say(msg)
+    print("|cffffd200Coffer:|r " .. msg)
+end
+
+local function PrintHelp()
+    Say("commands")
+    print("  /coffer - show or hide the panel")
+    print("  /coffer reset - start a new session (run history is kept)")
+    print("  /coffer lock | unlock - stop or allow dragging the panel")
+    print("  /coffer value auction | vendor - how looted items are valued")
+    print("  /coffer reprice - re-value this session's items (e.g. after an AH scan)")
+    print("  /coffer clearruns - delete the recent runs history")
+    print("  /coffer debug - diagnostics window")
 end
 
 SLASH_COFFER1 = "/coffer"
 SlashCmdList["COFFER"] = function(msg)
     msg = strtrim((msg or ""):lower())
-    if msg == "reset" then
+    local cmd, arg = msg:match("^(%S*)%s*(.-)$")
+    if cmd == "" or cmd == "toggle" then
+        Coffer:ToggleFrame()
+    elseif cmd == "show" then
+        Coffer:SetPanelShown(true)
+    elseif cmd == "hide" then
+        Coffer:SetPanelShown(false)
+    elseif cmd == "reset" then
         Coffer:ResetSession()
-        print("|cffffd200Coffer:|r Session reset.")
-    elseif msg == "lock" then
-        Coffer.db.settings.locked = true
-        print("|cffffd200Coffer:|r Frame locked.")
-    elseif msg == "unlock" then
-        Coffer.db.settings.locked = false
-        print("|cffffd200Coffer:|r Frame unlocked.")
-    elseif msg == "debug" then
+        Say("session reset.")
+    elseif cmd == "lock" or cmd == "unlock" then
+        Coffer.db.settings.locked = (cmd == "lock")
+        Say("panel " .. cmd .. "ed.")
+    elseif cmd == "value" and (arg == "auction" or arg == "vendor") then
+        Coffer:SetValuation(arg)
+        Say("items now valued at " .. (arg == "auction" and "auction price (vendor price as the floor)." or "vendor price."))
+    elseif cmd == "reprice" then
+        Coffer:RepriceItems()
+        Say("items re-valued.")
+    elseif cmd == "clearruns" then
+        Coffer:ClearRuns()
+        Say("run history cleared.")
+    elseif cmd == "debug" then
         PrintDebug()
     else
-        Coffer:ToggleFrame()
+        PrintHelp()
     end
 end

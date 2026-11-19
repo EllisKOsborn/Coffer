@@ -1,120 +1,117 @@
 # Coffer
 
-A gold-per-hour tracker for **World of Warcraft: Forever**, in the style of Fojicore's
-`Campfires` / `GPH` panel. Coffer tracks exactly where your gold comes from — raw loot,
-quest hand-ins, vendor sales, and the estimated value of items still sitting in your
-bags — and keeps a running history of your dungeon runs so you can see what's actually
-worth farming.
+A gold-per-hour, loot and dungeon-run tracker for **World of Warcraft: Forever**. It
+takes the farming panel style of Fojicore's `Campfires` / `GPH` and the tracking
+techniques and instance lockout tracker of
+[KiwiFarm](https://github.com/michaelnpsp/KiwiFarm), and puts them in one addon.
 
 ![Coffer panel preview](screenshots/panel-preview.png)
 
-> This is a rendered mockup of the panel's actual layout and colors (built straight
-> from `UI.lua`'s structure, not a photoshop), used here to preview the design before
-> installing — **not** a live in-game screenshot. The real in-game font (Friz Quadrata)
-> and exact pixel spacing will look slightly different; numbers shown are sample data.
+> Rendered mockup of the panel's layout (from `UI.lua`) with a run tooltip, not a live
+> in-game screenshot. In-game fonts and exact spacing differ slightly; numbers are sample
+> data.
 
-## Features
+## What it tracks
 
-- **Live gold/hour** computed from a session that persists across logout/relog (reset
-  it manually by right-clicking the "This Session" header, or with `/coffer reset`,
-  whenever you want a clean read).
-- **Income broken out by source**: loot, quest rewards, and vendor sales are tracked
-  separately under the hood (see `CofferDB.session`), with Earned/Spent/Total shown
-  in the UI.
-- **Item drops**, valued via TradeSkillMaster or Auctionator market data when either
-  is installed, falling back automatically to vendor sell price for anything with no
-  scanned auction data.
-- **Recent Runs**: every 5-player dungeon you clear gets its own record — duration and
-  net gold — built by watching instance entry/exit, so Stratholme, Blackmaw Hold, and
-  the rest of Forever's new dungeons all show up automatically with no setup.
+- **Gold per hour**: (looted gold + quest gold + value of looted items) per hour,
+  counting **online time only**. Time spent logged off doesn't dilute it.
+- **This session**: earned gold, item value, spending and net total, kept across
+  logouts until you start a new session.
+- **Items**: everything you loot, with stack counts and value. Values use
+  TradeSkillMaster or Auctionator market prices when installed, and never go below
+  vendor price, since a vendor will always buy the item. Soulbound items fall back to
+  vendor price automatically. A vendor-only mode is available.
+- **Current run / recent runs**: every dungeon or raid visit becomes a run with
+  duration, gold, items, spending and kills. Dying and running back, or a `/reload`
+  mid-dungeon, continues the same run instead of splitting it.
+- **Instance lockouts**: how many instances you've used this hour and today against
+  the Classic limits (5 per hour, 30 per day, shared across your account), plus a
+  countdown to the next free slot once you hit the cap.
+
+Hover anything for details: items show their tooltip (shift-click links them in chat),
+runs show a full breakdown with their best drops, and the session, gold-per-hour and
+instances rows explain their numbers.
+
+## How it compares
+
+| | Fojicore GPH | KiwiFarm | Coffer |
+|---|---|---|---|
+| Always-on panel with collapsible sections | yes | text block | yes |
+| Per-run history | yes | no | yes, with per-run tooltips |
+| Instance lockout tracker (hour/day) | no | yes | yes, account-wide |
+| Item value: auction with vendor floor | vendor | configurable | yes (or vendor-only) |
+| Online-time-only rate | ? | yes | yes |
+| Runs survive deaths and `/reload` | ? | n/a | yes |
+| Kill counts | no | yes | per session and per run |
+| Built for Forever's client (C_Item APIs, secret values) | - | yes | yes |
 
 ## Install
 
-**Important:** World of Warcraft: Forever has its own, separate install folder —
-`_forever_` — not `_retail_` or `_classic_era_`. An addon dropped into the wrong one
-simply won't be seen by the client; there's no error, it just never loads.
+Forever has its **own** install folder, `_forever_`. Addons in `_retail_` or
+`_classic_era_` won't load in Forever.
 
-Copy (or symlink) this folder into Forever's AddOns directory so the addon folder is
-named exactly `Coffer`:
-
-```bash
-cp -r Coffer "/path/to/World of Warcraft/_forever_/Interface/AddOns/Coffer"
-```
-
-Then, at the character-select screen, click **AddOns** (bottom left) and make sure
-**Coffer** is checked. If it's unchecked and labeled out of date, tick "Load out of
-date AddOns" too (see the Compatibility note below).
-
-If you downloaded the GitHub ZIP instead of using git, the extracted folder will be
-named `Coffer-main` — rename it to `Coffer` before copying it in; the folder name has
-to match the addon's `.toc` file exactly.
+1. Download the ZIP from GitHub (green **Code** button, then **Download ZIP**).
+2. Extract it, and rename the folder from `Coffer-main` to `Coffer`.
+3. Move it to `World of Warcraft\_forever_\Interface\AddOns\Coffer`.
+4. Restart the game and make sure **Coffer** is ticked in the AddOns list at character
+   select.
 
 ## Usage
 
-- `/coffer` — toggle the panel.
-- Right-click the **THIS SESSION** header (or `/coffer reset`) — reset the current
-  session's totals (run history is kept).
-- The gear icon in the panel's header (or `/coffer lock` / `/coffer unlock`) — lock the
-  panel in place so it stops being draggable.
-- `/coffer debug` — prints load/diagnostic info to chat (version, whether
-  SavedVariables and the panel loaded, session/run counts). Useful whenever `/coffer`
-  seems to do nothing — see Troubleshooting below.
+- `/coffer`: show or hide the panel. It's also in the addon menu by the minimap.
+- Gear icon: lock the panel, switch item valuation, re-price items, start a new
+  session, clear run history.
+- Right-click **THIS SESSION**: start a new session (run history is kept).
+- Click a section header to collapse it. Coffer remembers which sections you
+  collapsed and whether the panel is shown.
+- `/coffer help` lists the commands: `reset`, `lock`, `unlock`,
+  `value auction|vendor`, `reprice`, `clearruns`, `debug`.
 
-## Troubleshooting "`/coffer` does nothing"
+## How the numbers are worked out
 
-1. **Log in and watch the chat window.** On a successful load, Coffer prints
-   `Coffer vX.X.X loaded. Type /coffer to open it...`. If you never see that line at
-   all, the addon isn't loading — it's not a bug in the panel, something's stopping it
-   from starting. Go to step 2.
-2. **If it never loads:** open the AddOns list at character select and check:
-   - The folder is `.../​_forever_/Interface/AddOns/Coffer/` (not `_retail_`, and not
-     nested as `AddOns/Coffer/Coffer/` or left named `Coffer-main`).
-   - "Coffer" is ticked in the list.
-   - It isn't greyed out / flagged out of date — if it is, enable "Load out of date
-     AddOns" (near the bottom of the AddOns list) and relog.
-3. **If it does load** (you saw the chat message) **but `/coffer` still shows
-   nothing:** run `/coffer debug` and send me what it prints — that tells us whether
-   the panel frame is even being built, and we can go from there.
+Coffer reads each source from the event that carries it rather than guessing from
+changes in your gold:
 
-## How values are classified
+- **Looted gold** comes from `CHAT_MSG_MONEY`, parsed with Blizzard's own localized
+  `GOLD_AMOUNT`/`SILVER_AMOUNT`/`COPPER_AMOUNT` templates. That covers "You loot ..."
+  and "Your share of the loot is ...", and guild-bank deposits in parentheses are
+  ignored.
+- **Quest gold** comes straight from `QUEST_TURNED_IN`'s money argument.
+- **Your loot** is matched against Blizzard's localized `LOOT_ITEM_SELF` templates.
+  Other players' loot uses a different template ("X receives loot"), so it can never
+  be counted as yours, and Forever's two-part character names don't matter.
+- **Spending** is any drop in your gold, except gold mailed or traded away, which
+  isn't spending.
+- **Vendor sales are not income.** A looted item's value was already counted when you
+  looted it, so selling it would count it twice. Sales are still shown in the session
+  tooltip.
 
-Rather than inferring money sources from `PLAYER_MONEY` deltas and timing heuristics,
-Coffer reads the dedicated event/argument each source actually provides (the same
-technique production addons like [KiwiFarm](https://github.com/michaelnpsp/KiwiFarm)
-use):
+This is the same convention the Fojicore panel uses. Its own numbers check out: (331
+earned + 233 items) / 51h15m = 11.0 gold/hour, and 331 + 233 - 374 spent = its 191
+total.
 
-- **Loot gold** is parsed directly out of `CHAT_MSG_MONEY`, using Blizzard's own
-  localized `GOLD_AMOUNT`/`SILVER_AMOUNT`/`COPPER_AMOUNT` message templates turned into
-  Lua patterns - this event fires specifically for money looted, so there's no need to
-  guess whether a balance change was loot.
-- **Quest gold** comes straight from `QUEST_TURNED_IN`'s own `moneyReward` argument.
-- **Vendor gold** and **spending** are the one case with no dedicated event: a
-  `PLAYER_MONEY` increase while the merchant window is open is a sale, any decrease is
-  spending (repairs, purchases, training, AH deposits, ...). By the time this handler
-  runs, loot and quest gold are already accounted for above, so it only has these two
-  cases left to classify - nothing is double-counted.
-
-**Item drops** are matched against Blizzard's own localized `LOOT_ITEM_SELF` /
-`LOOT_ITEM_SELF_MULTIPLE` / `LOOT_ITEM_PUSHED_SELF(_MULTIPLE)` chat templates (again,
-turned into Lua patterns) rather than any item link appearing in `CHAT_MSG_LOOT`. Since
-those templates are specifically the "You receive loot: ..." phrasing - distinct from
-"PlayerName receives loot: ..." for other party/raid members - this only ever matches
-your own loot, with no need to compare sender names or GUIDs against the player at all,
-and no risk of ambiguity from World of Warcraft: Forever's two-part name system (every
-character gets a Main Name *and* a Secondary Name).
+**Kills and lockouts:** on Forever's client, addons get `UNIT_DIED` with enemy GUIDs as
+"secret" values, and can't use the combat log. KiwiFarm works the same way. Kills
+count only inside instances, because in the open world there's no way to tell your
+kills from other players'. An instance uses a lockout slot on your first kill inside
+it. Resets are read from the system message, and logging out (not `/reload`) resets
+every instance you used, just as the game does.
 
 ## Testing without a WoW client
 
-`tests/` runs every `.lua` file through [fengari](https://fengari.io) (a Lua VM
-implemented in JS) outside the game: first a real syntax check on each file, then a
-full simulated playthrough (load → `/coffer` → `/coffer debug` → loot an item → have a
-party member loot something that must be ignored → turn in a quest → enter and leave a
-dungeon) against a mock of the WoW API, asserting the tracked numbers come out right at
-each step. It's not a substitute for actually playing with the addon loaded, but it
-catches load-time syntax errors and broken control flow before they ever reach a real
-client - which is exactly the kind of bug (a single invalid statement that silently
-killed all of `UI.lua`) that shipped undetected for several versions before this
-existed.
+`tests/` runs the addon under [fengari](https://fengari.io), a Lua VM in JavaScript,
+against a mock of Forever's client. The mock is strict where the real client is:
+
+- classic globals Forever lacks (`GetItemInfo`, `GetCoinTextureString`) don't exist
+- secret values behave like real ones (typed as strings, but any use errors)
+- registering the combat log is forbidden
+- frames start shown and fire `OnShow` only on a real change
+- calling a widget method that doesn't exist is an error
+- if Coffer reports any error through its own error handling, the run fails
+
+On top of that it plays a full farming session and makes 95 checks on the numbers,
+including `/reload`s, logout and login with saved data carried over, and a death
+mid-dungeon.
 
 ```bash
 cd tests
@@ -122,20 +119,16 @@ npm install
 npm test
 ```
 
-## Compatibility note
+The suite has been checked by reintroducing past bugs one at a time and confirming each
+one fails it: bare `GetItemInfo`, missing secret-value guards, a panel ticker that never
+starts, runs split by a death, wall-clock session time, vendor sales counted as income,
+mail counted as spending, layout height drifting from placement, and open-world kills.
 
-This addon targets World of Warcraft: Forever (patch 1.60.x), which runs on the same
-client as modern retail, so it uses the modern `Item` mixin and `C_AddOns` APIs. The
-`## Interface` number in `Coffer.toc` is set from community reporting around launch;
-if the game refuses to load the addon as "out of date," check your real interface
-number in-game with `/run print(select(4, GetBuildInfo()))` and update the TOC.
+## Known limitations
 
-## Known limitations / ideas for later
-
-- If you log out mid-dungeon, that in-progress run's gold is still counted in your
-  overall session total, but it won't appear as its own entry in Recent Runs (the run
-  only gets recorded once you leave the instance normally).
-- The Items and Recent Runs panels currently show the top 8 entries by value/recency;
-  a scrollable "show all" view would be a natural follow-up.
-- Raid support (10/25-man "party"→"raid" instance type) isn't tracked yet — only
-  5-player dungeons.
+- Lockout limits follow Classic rules (5 per hour, 30 per day), as KiwiFarm applies
+  them to Forever. If Forever's actual limits differ, they're two constants at the top
+  of `Lockouts.lua`.
+- Open-world kills aren't counted (see above).
+- Gold received by mail or trade isn't counted as income, since it isn't farming
+  income.

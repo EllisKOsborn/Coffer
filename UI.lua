@@ -1,579 +1,851 @@
 local addonName, Coffer = ...
 
-local PANEL_WIDTH = 280
+local PANEL_WIDTH = 290
 local PADDING = 14
+local CONTENT_WIDTH = PANEL_WIDTH - PADDING * 2
 local ROW_HEIGHT = 18
-local MAX_VISIBLE_ITEMS = 8
-local MAX_VISIBLE_RUNS = 8
+local GPH_HEIGHT = 22
+local TOP_CHROME = 40 -- icon inset + icon + gap down to the first row
+local BOTTOM_PAD = 10
+local MAX_ITEMS = 8
+local MAX_ITEMS_EXPANDED = 30
+local MAX_RUNS = 8
 
--- Pixel heights consumed by each kind of element, mirroring the literal offsets used
--- in the SetPoint calls below exactly (e.g. a row is anchored "-2" below the previous
--- one and is ROW_HEIGHT tall, so ROW_STEP = 2 + ROW_HEIGHT). These feed SetHeight
--- directly via arithmetic - see the note on GetTop()/GetBottom() further down for why
--- this panel's height is computed this way instead of measuring the frames themselves.
-local TOP_CHROME_HEIGHT = 12 + 18 + 10 -- icon top inset + icon height + gap to content
-local GOLD_ROW_STEP = 6 + ROW_HEIGHT    -- gap before "Your gold" + its own height
-local SECTION_HEADER_STEP = 14 + ROW_HEIGHT -- gap before a section header + its height
-local ROW_STEP = 2 + ROW_HEIGHT         -- gap before a body/item/run row + its height
-local MORE_LINE_STEP = 2 + 14           -- gap before a "more" label + its approx text height
-
-local GOLD = { 1, 0.82, 0 }
-local WHITE = { 0.92, 0.92, 0.92 }
-local MUTED = { 0.6, 0.6, 0.6 }
-local GREEN = { 0.25, 0.82, 0.42 }
-local RED = { 1, 0.37, 0.37 }
+local FONT = "Fonts\\FRIZQT__.TTF"
+local COLORS = {
+    gold = { 1, 0.82, 0 },
+    white = { 0.93, 0.93, 0.93 },
+    label = { 0.74, 0.74, 0.74 },
+    muted = { 0.55, 0.55, 0.55 },
+    green = { 0.32, 0.86, 0.47 },
+    red = { 1, 0.4, 0.4 },
+    orange = { 1, 0.62, 0.2 },
+    border = { 0.55, 0.43, 0.15 },
+}
+local GRAY = "|cff8a8a8a"
 
 local frame
-local gphValue, goldValue
-local earnedValue, sessionItemsValue, spentValue, netValue
-local curRunEarnedValue
-local itemsSection, runsSection
-local itemRows = {}
-local runRows = {}
+local rows = {}      -- fixed rows, by name
+local sections = {}  -- collapsible sections, by key
+local itemPool, runPool = {}, {}
 local ticker
 
--- Deliberately avoids the "BackdropTemplate" XML template: Forever's interface version
--- (1.60.x) follows Classic's numbering, not modern retail's, and that template's
--- availability can't be assumed. Built from plain textures instead, which every WoW
--- client version supports with zero dependency on named templates.
-local function CreateBackdropFrame(parent, name)
+-- ---------------------------------------------------------------------------
+-- Widget helpers
+-- ---------------------------------------------------------------------------
+-- Everything is built from plain textures and font strings rather than Blizzard XML
+-- templates (BackdropTemplate, UIPanelCloseButton, dropdown menus): which templates
+-- exist on Forever's client can't be assumed, and a missing one breaks the whole panel.
+
+local function SetFont(fs, size, color, flags)
+    fs:SetFont(FONT, size, flags or "")
+    if color then fs:SetTextColor(color[1], color[2], color[3]) end
+end
+
+local function Text(parent, size, color, flags)
+    local fs = parent:CreateFontString(nil, "OVERLAY")
+    SetFont(fs, size, color, flags)
+    if fs.SetWordWrap then fs:SetWordWrap(false) end
+    return fs
+end
+
+local function Solid(parent, layer, color, alpha)
+    local t = parent:CreateTexture(nil, layer)
+    t:SetColorTexture(color[1], color[2], color[3], alpha)
+    return t
+end
+
+local function Paint(fs, color)
+    fs:SetTextColor(color[1], color[2], color[3])
+end
+
+local function Hex(color)
+    local function byte(c) return math.floor(c * 255 + 0.5) end
+    return ("|cff%02x%02x%02x"):format(byte(color[1]), byte(color[2]), byte(color[3]))
+end
+
+local function Box(parent, name, alpha)
     local f = CreateFrame("Frame", name, parent)
-
-    local bg = f:CreateTexture(nil, "BACKGROUND")
-    bg:SetAllPoints()
-    bg:SetColorTexture(0.04, 0.04, 0.05, 0.93)
-
-    local function Edge(p1, p2, width, height)
-        local t = f:CreateTexture(nil, "BORDER")
-        t:SetColorTexture(0.5, 0.39, 0.14, 0.9)
+    Solid(f, "BACKGROUND", { 0.04, 0.04, 0.05 }, alpha or 0.93):SetAllPoints()
+    local function Edge(p1, p2, w, h)
+        local t = Solid(f, "BORDER", COLORS.border, 0.9)
         t:SetPoint(p1)
         t:SetPoint(p2)
-        if width then t:SetWidth(width) end
-        if height then t:SetHeight(height) end
-        return t
+        if w then t:SetWidth(w) end
+        if h then t:SetHeight(h) end
     end
     Edge("TOPLEFT", "TOPRIGHT", nil, 1)
     Edge("BOTTOMLEFT", "BOTTOMRIGHT", nil, 1)
     Edge("TOPLEFT", "BOTTOMLEFT", 1, nil)
     Edge("TOPRIGHT", "BOTTOMRIGHT", 1, nil)
-
     return f
 end
 
-local function SetFont(fs, size, color, flags)
-    fs:SetFont("Fonts\\FRIZQT__.TTF", size, flags or "")
-    if color then
-        fs:SetTextColor(color[1], color[2], color[3])
-    end
+local function ShowTooltip(owner, build)
+    if not GameTooltip then return end
+    GameTooltip:SetOwner(owner, "ANCHOR_LEFT")
+    local ok, err = pcall(build, GameTooltip)
+    if not ok then Coffer:ReportError("tooltip", err) end
+    GameTooltip:Show()
 end
 
-local function CreateLabelRow(parent, labelText, labelColor, valueSize)
-    local row = CreateFrame("Frame", nil, parent)
-    row:SetHeight(ROW_HEIGHT)
-    row:SetWidth(PANEL_WIDTH - PADDING * 2)
-
-    local label = row:CreateFontString(nil, "OVERLAY")
-    SetFont(label, 11, labelColor or MUTED)
-    label:SetPoint("LEFT", row, "LEFT", 0, 0)
-    label:SetText(labelText)
-
-    local value = row:CreateFontString(nil, "OVERLAY")
-    SetFont(value, valueSize or 12, WHITE)
-    value:SetPoint("RIGHT", row, "RIGHT", 0, 0)
-
-    return row, value
+local function HideTooltip()
+    if GameTooltip then GameTooltip:Hide() end
 end
 
--- A collapsible section header: a full-bleed highlighted bar (matching the reference
--- design) with a chevron + title on the left and a right-aligned "summary" value that
--- stays visible even while collapsed (session duration, items' total value, run count -
--- whichever the caller wires up). Left-click toggles collapse; right-click is free for
--- the caller to hook (used for "reset" on the session section, replacing a separate
--- always-visible button the reference design has no room for).
--- Returns the section table; .body should be anchored by the caller and shown/hidden
--- based on section.collapsed.
-local function CreateSection(parent, title)
-    local header = CreateFrame("Button", nil, parent)
-    header:SetHeight(ROW_HEIGHT)
-    header:SetWidth(PANEL_WIDTH - PADDING * 2)
-    header:RegisterForClicks("LeftButtonUp", "RightButtonUp")
-
-    local bg = header:CreateTexture(nil, "BACKGROUND")
-    bg:SetPoint("TOPLEFT", header, "TOPLEFT", -PADDING, 0)
-    bg:SetPoint("BOTTOMRIGHT", header, "BOTTOMRIGHT", PADDING, 0)
-    bg:SetColorTexture(0.55, 0.43, 0.15, 0.12)
-
-    local chevron = header:CreateFontString(nil, "OVERLAY")
-    SetFont(chevron, 9, GOLD)
-    chevron:SetPoint("LEFT", header, "LEFT", 0, 0)
-    chevron:SetText("v")
-
-    local label = header:CreateFontString(nil, "OVERLAY")
-    SetFont(label, 11, GOLD, "")
-    label:SetPoint("LEFT", chevron, "RIGHT", 5, 0)
-    label:SetText(title:upper())
-
-    local summary = header:CreateFontString(nil, "OVERLAY")
-    SetFont(summary, 11, MUTED)
-    summary:SetPoint("RIGHT", header, "RIGHT", 0, 0)
-
-    local section = { header = header, chevron = chevron, label = label, summary = summary, collapsed = false }
-    header:SetScript("OnClick", function(_, button)
-        if button == "RightButton" and section.onRightClick then
-            section.onRightClick()
-            return
-        end
-        section.collapsed = not section.collapsed
-        section.chevron:SetText(section.collapsed and ">" or "v")
-        Coffer:RefreshUI()
-    end)
-    return section
+local function Line(tip, left, right, color)
+    color = color or COLORS.white
+    tip:AddDoubleLine(left, right, COLORS.label[1], COLORS.label[2], COLORS.label[3], color[1], color[2], color[3])
 end
 
-local function AcquireRow(pool, parent)
-    for _, row in ipairs(pool) do
-        if not row.used then
-            row.used = true
-            row:Show()
-            return row
-        end
-    end
-    local row = CreateFrame("Frame", nil, parent)
-    row:SetHeight(ROW_HEIGHT)
-    row:SetWidth(PANEL_WIDTH - PADDING * 2)
+-- Rows take the mouse for tooltips, which would stop the panel being dragged by them;
+-- forward drags to the panel.
+local function ForwardDrag(region)
+    region:RegisterForDrag("LeftButton")
+    region:SetScript("OnDragStart", function() frame:GetScript("OnDragStart")(frame) end)
+    region:SetScript("OnDragStop", function() frame:GetScript("OnDragStop")(frame) end)
+end
 
-    row.icon = row:CreateTexture(nil, "ARTWORK")
-    row.icon:SetSize(14, 14)
-    row.icon:SetPoint("LEFT", row, "LEFT", 0, 0)
+local function Hoverable(region, build)
+    region:EnableMouse(true)
+    region:SetScript("OnEnter", function(self) ShowTooltip(self, function(tip) build(tip, self) end) end)
+    region:SetScript("OnLeave", HideTooltip)
+    ForwardDrag(region)
+end
 
-    row.name = row:CreateFontString(nil, "OVERLAY")
-    SetFont(row.name, 11, WHITE)
-    row.name:SetPoint("LEFT", row.icon, "RIGHT", 5, 0)
-    row.name:SetJustifyH("LEFT")
-
-    row.value = row:CreateFontString(nil, "OVERLAY")
-    SetFont(row.value, 11, GOLD)
-    row.value:SetPoint("RIGHT", row, "RIGHT", 0, 0)
-
-    row.used = true
-    table.insert(pool, row)
+local function LabelRow(label)
+    local row = CreateFrame("Frame", nil, frame)
+    row:SetSize(CONTENT_WIDTH, ROW_HEIGHT)
+    row.label = Text(row, 11, COLORS.label)
+    row.label:SetPoint("LEFT")
+    row.label:SetText(label)
+    row.value = Text(row, 12, COLORS.white)
+    row.value:SetPoint("RIGHT")
     return row
 end
 
-local function ReleaseUnused(pool)
-    for _, row in ipairs(pool) do
-        if not row.used then
-            row:Hide()
+-- ---------------------------------------------------------------------------
+-- Layout
+-- ---------------------------------------------------------------------------
+-- Every visible region is positioned through Place(), which also adds its height to a
+-- running total. The panel's height therefore comes from the very same numbers that
+-- positioned its contents - never from GetTop()/GetBottom(), whose results aren't
+-- reliably readable from Lua on this client (the cause of the earlier invisible,
+-- zero-height panel).
+
+local layout
+
+local function Begin()
+    layout = { anchor = nil, x = 0, height = TOP_CHROME }
+end
+
+local function Place(region, gap, height, x)
+    x = x or 0
+    region:ClearAllPoints()
+    if layout.anchor then
+        -- relative to the previous region, compensating its own indent
+        region:SetPoint("TOPLEFT", layout.anchor, "BOTTOMLEFT", x - layout.x, -gap)
+    else
+        region:SetPoint("TOPLEFT", frame, "TOPLEFT", PADDING + x, -(layout.height + gap))
+    end
+    layout.anchor, layout.x = region, x
+    layout.height = layout.height + gap + height
+    region:Show()
+end
+
+-- ---------------------------------------------------------------------------
+-- Sections
+-- ---------------------------------------------------------------------------
+
+local function SetChevron(section)
+    section.chevron:SetText(section.collapsed and ">" or "v")
+end
+
+-- A collapsible section: a full-width highlighted header bar with a title on the left
+-- and a summary (duration, total, count) on the right that stays visible when collapsed.
+-- Left-click collapses (remembered between sessions); right-click runs onRightClick.
+local function Section(key, title)
+    local s = { key = key }
+    local header = CreateFrame("Button", nil, frame)
+    header:SetSize(CONTENT_WIDTH, ROW_HEIGHT)
+    header:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+
+    local bar = Solid(header, "BACKGROUND", COLORS.border, 0.14)
+    bar:SetPoint("TOPLEFT", header, "TOPLEFT", -PADDING, 2)
+    bar:SetPoint("BOTTOMRIGHT", header, "BOTTOMRIGHT", PADDING, -1)
+    local rule = Solid(header, "BORDER", COLORS.border, 0.35)
+    rule:SetPoint("BOTTOMLEFT", bar, "BOTTOMLEFT")
+    rule:SetPoint("BOTTOMRIGHT", bar, "BOTTOMRIGHT")
+    rule:SetHeight(1)
+
+    s.chevron = Text(header, 9, COLORS.gold)
+    s.chevron:SetPoint("LEFT")
+    s.label = Text(header, 11, COLORS.gold)
+    s.label:SetPoint("LEFT", s.chevron, "RIGHT", 5, 0)
+    s.label:SetText(title)
+    s.summary = Text(header, 11, COLORS.muted)
+    s.summary:SetPoint("RIGHT")
+
+    s.collapsed = Coffer.db.settings.collapsed[key] and true or false
+    SetChevron(s)
+
+    header:SetScript("OnClick", function(_, button)
+        if button == "RightButton" then
+            if s.onRightClick then s.onRightClick() end
+            return
         end
-        row.used = false
+        s.collapsed = not s.collapsed
+        Coffer.db.settings.collapsed[key] = s.collapsed or nil
+        SetChevron(s)
+        Coffer:RefreshUI()
+    end)
+    header:SetScript("OnEnter", function(self)
+        if s.tooltip then ShowTooltip(self, s.tooltip) end
+    end)
+    header:SetScript("OnLeave", HideTooltip)
+    ForwardDrag(header)
+
+    s.header = header
+    sections[key] = s
+    return s
+end
+
+-- A "and N more" / empty-state line inside a section.
+local function NoteLine(onClick)
+    local b = CreateFrame("Button", nil, frame)
+    b:SetSize(CONTENT_WIDTH - 20, 14)
+    b.text = Text(b, 10, COLORS.muted)
+    b.text:SetPoint("LEFT")
+    if onClick then
+        b:SetScript("OnClick", onClick)
+        b:SetScript("OnEnter", function() Paint(b.text, COLORS.gold) end)
+        b:SetScript("OnLeave", function() Paint(b.text, COLORS.muted) end)
+    end
+    ForwardDrag(b)
+    return b
+end
+
+-- ---------------------------------------------------------------------------
+-- Tooltips
+-- ---------------------------------------------------------------------------
+
+local function ItemName(itemID, entry)
+    local name, _, quality = Coffer.GetItemInfo(itemID)
+    return name or (entry and entry.link) or ("item:" .. itemID), quality
+end
+
+local function RunTooltip(tip, run)
+    tip:AddLine(run.name, COLORS.gold[1], COLORS.gold[2], COLORS.gold[3])
+    local started = date and date("%a %H:%M", run.startTime) or ""
+    tip:AddLine(started .. "  " .. GRAY .. Coffer:FormatDuration(Coffer:GetRunDuration(run)) .. "|r", 0.7, 0.7, 0.7)
+    tip:AddLine(" ")
+    local itemsValue = run.itemsValue or Coffer:GetRunItemsValue(run)
+    Line(tip, "Looted gold", Coffer:FormatSignedShort(run.loot or 0), COLORS.green)
+    Line(tip, "Quest gold", Coffer:FormatSignedShort(run.quest or 0), COLORS.green)
+    Line(tip, "Items", Coffer:FormatSignedShort(itemsValue), COLORS.green)
+    Line(tip, "Spent", Coffer:FormatSignedShort(-(run.spent or 0)), COLORS.red)
+    local net = Coffer:GetRunNet(run)
+    Line(tip, "Net", Coffer:FormatSignedShort(net), net >= 0 and COLORS.green or COLORS.red)
+    Line(tip, "Kills", tostring(run.kills or 0))
+
+    local list = {}
+    for itemID, entry in pairs(run.items or {}) do
+        list[#list + 1] = { id = itemID, count = entry.count, value = Coffer:ValueOf(itemID) * entry.count }
+    end
+    table.sort(list, function(a, b) return a.value > b.value end)
+    if #list > 0 then
+        tip:AddLine(" ")
+        for i = 1, math.min(#list, 6) do
+            local name, quality = ItemName(list[i].id)
+            local r, g, b = Coffer:GetQualityColor(quality)
+            tip:AddDoubleLine(name .. (list[i].count > 1 and (GRAY .. " x" .. list[i].count .. "|r") or ""),
+                Coffer:FormatShort(list[i].value), r, g, b, 1, 1, 1)
+        end
+        if #list > 6 then
+            tip:AddLine(("and %d more"):format(#list - 6), 0.55, 0.55, 0.55)
+        end
+    end
+end
+
+local function SessionTooltip(tip)
+    local s = Coffer.db.session
+    tip:AddLine("This session", COLORS.gold[1], COLORS.gold[2], COLORS.gold[3])
+    tip:AddLine("Online time only - time logged off doesn't count.", 0.7, 0.7, 0.7, true)
+    tip:AddLine(" ")
+    Line(tip, "Looted gold", Coffer:FormatSignedShort(s.loot), COLORS.green)
+    Line(tip, "Quest gold", Coffer:FormatSignedShort(s.quest), COLORS.green)
+    Line(tip, "Items looted", Coffer:FormatSignedShort(Coffer:GetSessionItemsValue()), COLORS.green)
+    Line(tip, "Spent", Coffer:FormatSignedShort(-s.spent), COLORS.red)
+    Line(tip, "Kills", tostring(s.kills))
+    Line(tip, "Sold to vendors", Coffer:FormatShort(s.vendor), COLORS.muted)
+    tip:AddLine(" ")
+    tip:AddLine("Vendor sales aren't counted as income: those items were already counted at their value when looted.", 0.55, 0.55, 0.55, true)
+    tip:AddLine("Right-click to start a new session.", 0.55, 0.55, 0.55)
+end
+
+local function GphTooltip(tip)
+    tip:AddLine("Gold per hour", COLORS.gold[1], COLORS.gold[2], COLORS.gold[3])
+    tip:AddLine("(looted gold + quest gold + item value) / online time", 0.75, 0.75, 0.75, true)
+    tip:AddLine(" ")
+    local valuation = Coffer.db.settings.valuation
+    tip:AddLine(valuation == "auction"
+        and "Items are valued at auction price (TSM or Auctionator), never below vendor price."
+        or "Items are valued at vendor price.", 0.55, 0.55, 0.55, true)
+end
+
+local function LockoutTooltip(tip)
+    local st = Coffer:GetLockoutStatus()
+    tip:AddLine("Instance lockouts", COLORS.gold[1], COLORS.gold[2], COLORS.gold[3])
+    tip:AddLine(("Classic rules: %d instances per hour, %d per day, shared by your whole account. An instance counts once you've killed something in it."):format(st.hourLimit, st.dayLimit), 0.75, 0.75, 0.75, true)
+    if st.freeIn then
+        tip:AddLine(" ")
+        tip:AddLine("Next instance available in " .. Coffer:FormatDuration(st.freeIn), COLORS.red[1], COLORS.red[2], COLORS.red[3])
+    end
+    if #st.entries > 0 then
+        tip:AddLine(" ")
+        local now = time()
+        for i = #st.entries, math.max(1, #st.entries - 9), -1 do
+            local e = st.entries[i]
+            local ago = Coffer:FormatDuration(now - e.time) .. " ago"
+            local recent = now - e.time < 3600
+            tip:AddDoubleLine(e.zone .. (e.reset and (GRAY .. " (reset)|r") or ""), ago,
+                recent and 1 or 0.6, recent and 1 or 0.6, recent and 1 or 0.6, 0.6, 0.6, 0.6)
+        end
+    end
+end
+
+-- ---------------------------------------------------------------------------
+-- List rows (items, runs)
+-- ---------------------------------------------------------------------------
+
+local function ListRow(pool, index, withIcon)
+    local row = pool[index]
+    if row then return row end
+    row = CreateFrame("Button", nil, frame)
+    row:SetSize(CONTENT_WIDTH, ROW_HEIGHT)
+    local highlight = Solid(row, "HIGHLIGHT", { 1, 1, 1 }, 0.06)
+    highlight:SetPoint("TOPLEFT", -4, 0)
+    highlight:SetPoint("BOTTOMRIGHT", 4, 0)
+    row.value = Text(row, 11, COLORS.white)
+    row.value:SetPoint("RIGHT")
+    row.name = Text(row, 11, COLORS.white)
+    row.name:SetJustifyH("LEFT")
+    if withIcon then
+        row.icon = row:CreateTexture(nil, "ARTWORK")
+        row.icon:SetSize(14, 14)
+        row.icon:SetPoint("LEFT")
+        row.icon:SetTexCoord(0.07, 0.93, 0.07, 0.93)
+        row.name:SetPoint("LEFT", row.icon, "RIGHT", 6, 0)
+    else
+        row.name:SetPoint("LEFT")
+    end
+    row.name:SetPoint("RIGHT", row.value, "LEFT", -6, 0)
+    row:SetScript("OnEnter", function(self)
+        if self.tooltip then ShowTooltip(self, self.tooltip) end
+    end)
+    row:SetScript("OnLeave", HideTooltip)
+    row:SetScript("OnClick", function(self)
+        -- shift-click an item to link it in chat, like anywhere else in the UI
+        if self.link and IsShiftKeyDown and IsShiftKeyDown() and ChatEdit_InsertLink then
+            ChatEdit_InsertLink(self.link)
+        end
+    end)
+    ForwardDrag(row)
+    pool[index] = row
+    return row
+end
+
+local function HideFrom(pool, first)
+    for i = first, #pool do
+        pool[i]:Hide()
+    end
+end
+
+local function SortedItems()
+    local list = {}
+    for itemID, entry in pairs(Coffer.db.session.items) do
+        list[#list + 1] = { id = itemID, entry = entry, total = (entry.value or 0) * entry.count }
+    end
+    table.sort(list, function(a, b)
+        if a.total ~= b.total then return a.total > b.total end
+        return a.id < b.id
+    end)
+    return list
+end
+
+local function SignedColor(amount)
+    if math.floor(math.abs(amount) + 0.5) == 0 then return COLORS.muted end
+    return amount > 0 and COLORS.green or COLORS.red
+end
+
+-- ---------------------------------------------------------------------------
+-- Refresh
+-- ---------------------------------------------------------------------------
+
+local function LayoutTop()
+    local gph = Coffer:GetGoldPerHour()
+    Place(rows.gph, 0, GPH_HEIGHT)
+    rows.gph.value:SetText(gph and (Coffer:FormatShort(gph) .. GRAY .. " /hr|r") or (GRAY .. "-|r"))
+
+    Place(rows.gold, 4, ROW_HEIGHT)
+    rows.gold.value:SetText(Coffer:FormatMoney(GetMoney()))
+
+    Place(rows.instances, 2, ROW_HEIGHT)
+    local st = Coffer:GetLockoutStatus()
+    local hourColor = st.hour >= st.hourLimit and COLORS.red
+        or (st.hour >= st.hourLimit - 1 and COLORS.orange or COLORS.white)
+    local dayColor = st.day >= st.dayLimit and COLORS.red
+        or (st.day >= st.dayLimit - 5 and COLORS.orange or COLORS.white)
+    local text = ("%s%d/%d|r%s hr|r  %s%d/%d|r%s day|r"):format(
+        Hex(hourColor), st.hour, st.hourLimit, GRAY, Hex(dayColor), st.day, st.dayLimit, GRAY)
+    if st.freeIn then
+        text = Hex(COLORS.red) .. "free in " .. Coffer:FormatDuration(st.freeIn) .. "|r  " .. text
+    end
+    rows.instances.value:SetText(text)
+end
+
+local function LayoutCurrentRun()
+    local s = sections.current
+    local run = Coffer:GetActiveRun()
+    if not run then
+        s.header:Hide()
+        rows.current:Hide()
+        return
+    end
+    Place(s.header, 12, ROW_HEIGHT)
+    s.summary:SetText(Coffer:FormatDuration(Coffer:GetRunDuration(run))
+        .. (run.pausedAt and (Hex(COLORS.red) .. "  dead|r") or ""))
+    if s.collapsed then
+        rows.current:Hide()
+        return
+    end
+    Place(rows.current, 2, ROW_HEIGHT)
+    rows.current.label:SetText(run.name)
+    local net = Coffer:GetRunNet(run)
+    rows.current.value:SetText(Coffer:FormatSignedShort(net))
+    Paint(rows.current.value, SignedColor(net))
+end
+
+local function LayoutSession()
+    local s = sections.session
+    Place(s.header, 12, ROW_HEIGHT)
+    s.summary:SetText(Coffer:FormatDuration(Coffer:GetSessionDuration()))
+    local sessionRows = { rows.earned, rows.items, rows.spent, rows.total }
+    if s.collapsed then
+        for _, row in ipairs(sessionRows) do row:Hide() end
+        return
+    end
+    local values = {
+        Coffer:GetSessionEarned(),
+        Coffer:GetSessionItemsValue(),
+        -Coffer.db.session.spent,
+        Coffer:GetSessionNet(),
+    }
+    for i, row in ipairs(sessionRows) do
+        Place(row, 2, ROW_HEIGHT)
+        row.value:SetText(Coffer:FormatSignedShort(values[i]))
+        Paint(row.value, SignedColor(values[i]))
+    end
+end
+
+local showAllItems = false
+
+local function LayoutItems()
+    local s = sections.items
+    Place(s.header, 12, ROW_HEIGHT)
+    s.summary:SetText(Coffer:FormatShort(Coffer:GetSessionItemsValue()))
+    if s.collapsed then
+        HideFrom(itemPool, 1)
+        rows.itemsNote:Hide()
+        return
+    end
+
+    local list = SortedItems()
+    local limit = showAllItems and MAX_ITEMS_EXPANDED or MAX_ITEMS
+    local shown = math.min(#list, limit)
+    for i = 1, shown do
+        local data = list[i]
+        local row = ListRow(itemPool, i, true)
+        local name, quality = ItemName(data.id, data.entry)
+        local r, g, b = Coffer:GetQualityColor(quality)
+        row.icon:SetTexture((Coffer.GetItemIcon and Coffer.GetItemIcon(data.id)) or 134400)
+        row.name:SetText(name .. (data.entry.count > 1 and (GRAY .. "  x" .. data.entry.count .. "|r") or ""))
+        row.name:SetTextColor(r, g, b)
+        row.value:SetText(data.entry.value and Coffer:FormatShort(data.total) or (GRAY .. "...|r"))
+        row.link, row.itemID = data.entry.link, data.id
+        row.tooltip = function(tip)
+            if row.link then
+                tip:SetHyperlink(row.link)
+            elseif tip.SetItemByID then
+                tip:SetItemByID(row.itemID)
+            end
+            tip:AddLine(" ")
+            local each = data.entry.value or 0
+            tip:AddDoubleLine("Looted this session", tostring(data.entry.count), 0.75, 0.75, 0.75, 1, 1, 1)
+            tip:AddDoubleLine("Value each (" .. (data.entry.source or "?") .. ")", Coffer:FormatMoney(each), 0.75, 0.75, 0.75, 1, 1, 1)
+            tip:AddLine("Shift-click to link in chat", 0.55, 0.55, 0.55)
+        end
+        Place(row, 2, ROW_HEIGHT)
+    end
+    HideFrom(itemPool, shown + 1)
+
+    local note = rows.itemsNote
+    if #list == 0 then
+        note.text:SetText("Nothing looted yet this session")
+        Place(note, 2, 14, 20)
+    elseif #list > MAX_ITEMS then
+        note.text:SetText(showAllItems and "show fewer" or ("and %d more"):format(#list - shown))
+        Place(note, 2, 14, 20)
+    else
+        note:Hide()
+    end
+end
+
+local function LayoutRuns()
+    local s = sections.runs
+    local runs = Coffer.db.runs
+    Place(s.header, 12, ROW_HEIGHT)
+    s.summary:SetText(#runs == 1 and "1 run" or (#runs .. " runs"))
+    if s.collapsed then
+        HideFrom(runPool, 1)
+        rows.runsNote:Hide()
+        return
+    end
+
+    local shown = math.min(#runs, MAX_RUNS)
+    for i = 1, shown do
+        local run = runs[i]
+        local row = ListRow(runPool, i, false)
+        row.name:SetText(GRAY .. Coffer:FormatDuration(run.duration or Coffer:GetRunDuration(run)) .. "|r  " .. (run.name or "?"))
+        local net = Coffer:GetRunNet(run)
+        row.value:SetText(Coffer:FormatSignedShort(net))
+        Paint(row.value, SignedColor(net))
+        row.link = nil
+        row.tooltip = function(tip) RunTooltip(tip, run) end
+        Place(row, 2, ROW_HEIGHT)
+    end
+    HideFrom(runPool, shown + 1)
+
+    if #runs == 0 then
+        rows.runsNote.text:SetText("Finished dungeon runs show up here")
+        Place(rows.runsNote, 2, 14, 20)
+    else
+        rows.runsNote:Hide()
+    end
+end
+
+local function RefreshUIImpl()
+    if not frame or not frame:IsShown() or not Coffer.db then return end
+    Begin()
+    LayoutTop()
+    LayoutCurrentRun()
+    LayoutSession()
+    LayoutItems()
+    LayoutRuns()
+    frame:SetHeight(layout.height + BOTTOM_PAD)
+end
+
+local lastUIError
+function Coffer:RefreshUI()
+    local ok, err = pcall(RefreshUIImpl)
+    if not ok and err ~= lastUIError then
+        lastUIError = err
+        self:ReportError("panel", err)
+    end
+end
+
+-- ---------------------------------------------------------------------------
+-- Settings menu (built by hand: dropdown menu templates differ between clients)
+-- ---------------------------------------------------------------------------
+
+local menu
+
+local function Confirm(key, text, onAccept)
+    if StaticPopupDialogs and StaticPopup_Show then
+        StaticPopupDialogs[key] = {
+            text = text, button1 = YES or "Yes", button2 = NO or "No",
+            OnAccept = onAccept, timeout = 0, whileDead = true, hideOnEscape = true,
+        }
+        StaticPopup_Show(key)
+    else
+        onAccept()
+    end
+end
+
+local function MenuEntries()
+    local settings = Coffer.db.settings
+    local function mark(on) return on and "|cffffd200>|r " or "   " end
+    return {
+        { text = settings.locked and "Unlock panel" or "Lock panel", func = function()
+            settings.locked = not settings.locked
+        end },
+        { text = mark(settings.valuation == "auction") .. "Value items at auction price", func = function()
+            Coffer:SetValuation("auction")
+        end },
+        { text = mark(settings.valuation == "vendor") .. "Value items at vendor price", func = function()
+            Coffer:SetValuation("vendor")
+        end },
+        { text = "Re-price items now", func = function() Coffer:RepriceItems() end },
+        { text = "Start a new session...", func = function()
+            Confirm("COFFER_RESET_SESSION", "Start a new Coffer session? Run history is kept.", function() Coffer:ResetSession() end)
+        end },
+        { text = "Clear run history...", func = function()
+            Confirm("COFFER_CLEAR_RUNS", "Delete Coffer's recent runs history?", function() Coffer:ClearRuns() end)
+        end },
+    }
+end
+
+local function ToggleMenu(anchor)
+    if menu and menu:IsShown() then
+        menu:Hide()
+        return
+    end
+    if not menu then
+        menu = Box(UIParent, "CofferMenu", 0.97)
+        menu:SetFrameStrata("DIALOG")
+        menu:SetClampedToScreen(true)
+        menu:EnableMouse(true)
+        menu.buttons = {}
+        if UISpecialFrames then table.insert(UISpecialFrames, "CofferMenu") end -- Escape closes it
+    end
+    local entries = MenuEntries()
+    for i, entry in ipairs(entries) do
+        local b = menu.buttons[i]
+        if not b then
+            b = CreateFrame("Button", nil, menu)
+            b:SetSize(210, 18)
+            b:SetPoint("TOPLEFT", 6, -6 - (i - 1) * 18)
+            Solid(b, "HIGHLIGHT", COLORS.gold, 0.12):SetAllPoints()
+            b.text = Text(b, 11, COLORS.white)
+            b.text:SetPoint("LEFT", 4, 0)
+            menu.buttons[i] = b
+        end
+        b.text:SetText(entry.text)
+        b:SetScript("OnClick", function()
+            menu:Hide()
+            entry.func()
+            Coffer:RefreshUI()
+        end)
+        b:Show()
+    end
+    menu:SetSize(222, #entries * 18 + 12)
+    menu:ClearAllPoints()
+    menu:SetPoint("TOPRIGHT", anchor, "BOTTOMRIGHT", 0, -4)
+    menu:Show()
+end
+
+-- ---------------------------------------------------------------------------
+-- Build
+-- ---------------------------------------------------------------------------
+
+-- Refreshes once a second while visible, so durations and gold per hour stay live.
+local function StartTicker()
+    if not ticker then
+        ticker = C_Timer.NewTicker(1, function() Coffer:RefreshUI() end)
+    end
+end
+
+local function StopTicker()
+    if ticker then
+        ticker:Cancel()
+        ticker = nil
     end
 end
 
 local function BuildFrame()
-    frame = CreateBackdropFrame(UIParent, "CofferFrame")
+    frame = Box(UIParent, "CofferFrame")
     frame:SetWidth(PANEL_WIDTH)
+    frame:SetFrameStrata("MEDIUM")
     frame:SetMovable(true)
     frame:EnableMouse(true)
+    frame:SetClampedToScreen(true)
     frame:RegisterForDrag("LeftButton")
     frame:SetScript("OnDragStart", function(self)
-        if not Coffer.db.settings.locked then
-            self:StartMoving()
-        end
+        if not Coffer.db.settings.locked then self:StartMoving() end
     end)
     frame:SetScript("OnDragStop", function(self)
         self:StopMovingOrSizing()
         local point, _, relPoint, x, y = self:GetPoint()
         Coffer.db.settings.point = { point, relPoint, x, y }
     end)
-    frame:SetClampedToScreen(true)
 
     -- header
     local icon = frame:CreateTexture(nil, "ARTWORK")
     icon:SetSize(18, 18)
     icon:SetPoint("TOPLEFT", PADDING, -12)
     icon:SetTexture("Interface\\Icons\\INV_Misc_Coin_01")
-
-    local title = frame:CreateFontString(nil, "OVERLAY")
-    SetFont(title, 14, GOLD, "OUTLINE")
+    icon:SetTexCoord(0.07, 0.93, 0.07, 0.93)
+    local title = Text(frame, 14, COLORS.gold, "OUTLINE")
     title:SetPoint("LEFT", icon, "RIGHT", 6, 0)
     title:SetText("Coffer")
 
-    -- Built manually (no "UIPanelCloseButton" template) for the same reason as
-    -- CreateBackdropFrame above: don't assume a named template exists on this client.
-    local closeButton = CreateFrame("Button", nil, frame)
-    closeButton:SetSize(16, 16)
-    closeButton:SetPoint("TOPRIGHT", -4, -4)
-    local closeLabel = closeButton:CreateFontString(nil, "OVERLAY")
-    SetFont(closeLabel, 13, MUTED)
-    closeLabel:SetPoint("CENTER")
-    closeLabel:SetText("x")
-    closeButton:SetScript("OnEnter", function() SetFont(closeLabel, 13, GOLD) end)
-    closeButton:SetScript("OnLeave", function() SetFont(closeLabel, 13, MUTED) end)
-    closeButton:SetScript("OnClick", function() frame:Hide() end)
+    local divider = Solid(frame, "BORDER", COLORS.border, 0.3)
+    divider:SetPoint("TOPLEFT", frame, "TOPLEFT", 1, -36)
+    divider:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -1, -36)
+    divider:SetHeight(1)
 
-    -- Settings/lock toggle, using a real icon texture (an actual profession icon that
-    -- happens to look like a gear) rather than a text glyph, since font glyph coverage
-    -- for symbols like a gear/refresh character can't be assumed on any given client.
-    local gearButton = CreateFrame("Button", nil, frame)
-    gearButton:SetSize(15, 15)
-    gearButton:SetPoint("RIGHT", closeButton, "LEFT", -6, 0)
-    local gearIcon = gearButton:CreateTexture(nil, "ARTWORK")
+    local close = CreateFrame("Button", nil, frame)
+    close:SetSize(16, 16)
+    close:SetPoint("TOPRIGHT", -6, -12)
+    close.text = Text(close, 13, COLORS.muted)
+    close.text:SetPoint("CENTER")
+    close.text:SetText("x")
+    close:SetScript("OnEnter", function() Paint(close.text, COLORS.gold) end)
+    close:SetScript("OnLeave", function() Paint(close.text, COLORS.muted) end)
+    close:SetScript("OnClick", function() Coffer:SetPanelShown(false) end)
+
+    -- settings: a real icon texture rather than a gear glyph, since font coverage for
+    -- symbol characters can't be assumed
+    local gear = CreateFrame("Button", nil, frame)
+    gear:SetSize(14, 14)
+    gear:SetPoint("RIGHT", close, "LEFT", -6, 0)
+    local gearIcon = gear:CreateTexture(nil, "ARTWORK")
     gearIcon:SetAllPoints()
     gearIcon:SetTexture("Interface\\Icons\\Trade_Engineering")
     gearIcon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
     gearIcon:SetVertexColor(0.65, 0.65, 0.65)
-    gearButton:SetScript("OnEnter", function() gearIcon:SetVertexColor(1, 0.82, 0) end)
-    gearButton:SetScript("OnLeave", function() gearIcon:SetVertexColor(0.65, 0.65, 0.65) end)
-    gearButton:SetScript("OnClick", function()
-        Coffer.db.settings.locked = not Coffer.db.settings.locked
-        print("|cffffd200Coffer:|r Frame " .. (Coffer.db.settings.locked and "locked" or "unlocked") .. ".")
-    end)
+    gear:SetScript("OnEnter", function() gearIcon:SetVertexColor(1, 0.82, 0) end)
+    gear:SetScript("OnLeave", function() gearIcon:SetVertexColor(0.65, 0.65, 0.65) end)
+    gear:SetScript("OnClick", function(self) ToggleMenu(self) end)
 
-    local cursor = frame:CreateTexture(nil, "ARTWORK") -- anchor placeholder
-    cursor:SetPoint("TOPLEFT", icon, "BOTTOMLEFT", 0, -10)
-    cursor:SetSize(1, 1)
-    frame.cursor = cursor
+    -- gold per hour, on a highlighted bar with an accent stripe as in the reference
+    local gph = CreateFrame("Frame", nil, frame)
+    gph:SetSize(CONTENT_WIDTH, GPH_HEIGHT)
+    local gphBar = Solid(gph, "BACKGROUND", COLORS.gold, 0.08)
+    gphBar:SetPoint("TOPLEFT", -PADDING + 1, 0)
+    gphBar:SetPoint("BOTTOMRIGHT", PADDING - 1, 0)
+    local accent = Solid(gph, "BORDER", COLORS.gold, 0.9)
+    accent:SetPoint("TOPLEFT", gphBar, "TOPLEFT")
+    accent:SetPoint("BOTTOMLEFT", gphBar, "BOTTOMLEFT")
+    accent:SetWidth(2)
+    gph.label = Text(gph, 12, COLORS.gold)
+    gph.label:SetPoint("LEFT")
+    gph.label:SetText("Gold per hour")
+    gph.value = Text(gph, 15, COLORS.gold)
+    gph.value:SetPoint("RIGHT")
+    Hoverable(gph, GphTooltip)
+    rows.gph = gph
 
-    -- gold per hour
-    local gphRow, gphVal = CreateLabelRow(frame, "Gold per hour", MUTED, 15)
-    SetFont(gphVal, 15, GOLD, "")
-    gphRow:SetPoint("TOPLEFT", cursor, "BOTTOMLEFT", 0, 0)
-    gphValue = gphVal
+    rows.gold = LabelRow("Your gold")
+    rows.instances = LabelRow("Instances")
+    Hoverable(rows.instances, LockoutTooltip)
 
-    local goldRow, goldVal = CreateLabelRow(frame, "Your gold", MUTED)
-    goldRow:SetPoint("TOPLEFT", gphRow, "BOTTOMLEFT", 0, -6)
-    goldValue = goldVal
-    frame.goldRow = goldRow
+    local current = Section("current", "CURRENT RUN")
+    current.tooltip = function(tip)
+        local run = Coffer:GetActiveRun()
+        if run then RunTooltip(tip, run) end
+    end
+    rows.current = LabelRow("")
+    Paint(rows.current.label, COLORS.white)
+    Hoverable(rows.current, current.tooltip)
 
-    -- current run section: only visible while inside a tracked (5-player) instance.
-    -- Duration lives on the header row itself (matching This Session below), so the
-    -- body is just the one "Earned here" row.
-    local currentRun = CreateSection(frame, "Current Run")
-    currentRun.header:SetPoint("TOPLEFT", goldRow, "BOTTOMLEFT", 0, -14) -- re-anchored every refresh
-
-    local curEarnedRow, curEarnedVal = CreateLabelRow(frame, "Earned here", MUTED)
-    curEarnedRow:SetPoint("TOPLEFT", currentRun.header, "BOTTOMLEFT", 0, -2)
-    curRunEarnedValue = curEarnedVal
-
-    currentRun.body = { curEarnedRow }
-    currentRun.bottom = curEarnedRow
-    frame.currentRunSection = currentRun
-
-    -- session section: duration shown on the header row itself; reset is a right-click
-    -- on the header (there's no room in this layout for a separate always-visible
-    -- button once duration moved onto that row).
-    local session = CreateSection(frame, "This Session")
-    session.header:SetPoint("TOPLEFT", currentRun.header, "BOTTOMLEFT", 0, -14) -- re-anchored every refresh
+    local session = Section("session", "THIS SESSION")
+    session.tooltip = SessionTooltip
     session.onRightClick = function()
-        if StaticPopup_Show then
-            StaticPopup_Show("COFFER_CONFIRM_RESET")
-        else
-            Coffer:ResetSession()
-        end
+        Confirm("COFFER_RESET_SESSION", "Start a new Coffer session? Run history is kept.", function() Coffer:ResetSession() end)
+    end
+    rows.earned = LabelRow("Earned")
+    rows.items = LabelRow("Items")
+    rows.spent = LabelRow("Spent")
+    rows.total = LabelRow("Total")
+    for _, key in ipairs({ "earned", "items", "spent", "total" }) do
+        Hoverable(rows[key], SessionTooltip)
     end
 
-    local earnedRow, earnedVal = CreateLabelRow(frame, "Earned", MUTED)
-    earnedRow:SetPoint("TOPLEFT", session.header, "BOTTOMLEFT", 0, -2)
-    earnedValue = earnedVal
+    Section("items", "ITEMS")
+    rows.itemsNote = NoteLine(function()
+        showAllItems = not showAllItems
+        Coffer:RefreshUI()
+    end)
 
-    local itemsValueRow, itemsValueVal = CreateLabelRow(frame, "Items", MUTED)
-    itemsValueRow:SetPoint("TOPLEFT", earnedRow, "BOTTOMLEFT", 0, -2)
-    sessionItemsValue = itemsValueVal
+    Section("runs", "RECENT RUNS")
+    rows.runsNote = NoteLine()
 
-    local spentRow, spentVal = CreateLabelRow(frame, "Spent", MUTED)
-    spentRow:SetPoint("TOPLEFT", itemsValueRow, "BOTTOMLEFT", 0, -2)
-    spentValue = spentVal
-
-    local netRow, netVal = CreateLabelRow(frame, "Total", MUTED)
-    netRow:SetPoint("TOPLEFT", spentRow, "BOTTOMLEFT", 0, -2)
-    netValue = netVal
-    session.body = { earnedRow, itemsValueRow, spentRow, netRow }
-    session.bottom = netRow
-
-    -- items section: total value of everything tracked this session shown right on the
-    -- header row, with an "and N more" line below the visible rows when there's overflow.
-    itemsSection = CreateSection(frame, "Items")
-    itemsSection.header:SetPoint("TOPLEFT", session.bottom, "BOTTOMLEFT", 0, -14)
-    itemsSection.more = frame:CreateFontString(nil, "OVERLAY")
-    SetFont(itemsSection.more, 10, MUTED)
-    itemsSection.more:SetPoint("LEFT", 0, 0)
-
-    -- runs section: run count shown right on the header row instead of a footer line.
-    runsSection = CreateSection(frame, "Recent Runs")
-
-    frame.sessionSection = session
-
-    -- Always anchor from TOPLEFT (restored position, or a fixed default) rather than
-    -- CENTER, so later SetHeight calls - as content grows or shrinks - only move the
-    -- bottom edge, never the top. Previously this computed a TOPLEFT equivalent from a
-    -- CENTER anchor via GetLeft()/GetTop(); anchoring TOPLEFT directly is simpler and
-    -- removes a dependency on those returning usable values at build time.
+    -- position: restored, else a fixed default; always a TOPLEFT-style anchor so height
+    -- changes grow the panel downward
     frame:ClearAllPoints()
-    if Coffer.db.settings.point then
-        local point, relPoint, x, y = unpack(Coffer.db.settings.point)
-        frame:SetPoint(point, UIParent, relPoint, x, y)
+    local point = Coffer.db.settings.point
+    if point then
+        frame:SetPoint(point[1], UIParent, point[2], point[3], point[4])
     else
         frame:SetPoint("TOPLEFT", UIParent, "TOPLEFT", 240, -200)
     end
 
-    frame:SetScript("OnShow", function()
-        if not ticker then
-            ticker = C_Timer.NewTicker(2, function() Coffer:RefreshUI() end)
-        end
-    end)
+    -- OnShow/OnHide also cover the whole UI being hidden (Alt+Z); the panel's own first
+    -- Show() doesn't fire OnShow (frames are created already shown), so SetPanelShown
+    -- starts the ticker explicitly too.
+    frame:SetScript("OnShow", StartTicker)
     frame:SetScript("OnHide", function()
-        if ticker then
-            ticker:Cancel()
-            ticker = nil
-        end
+        StopTicker()
+        if menu then menu:Hide() end
     end)
-end
-
--- Returns (cursor, heightUsed): cursor is the frame later elements anchor below, and
--- heightUsed is the exact pixel height this section consumed, computed arithmetically
--- (see the constants above) rather than measured back from the frames afterward.
-local function LayoutCurrentRun(anchor)
-    local section = frame.currentRunSection
-    local run = Coffer:GetActiveRun()
-
-    if not run then
-        section.header:Hide()
-        for _, row in ipairs(section.body) do
-            row:Hide()
-        end
-        return anchor, 0
-    end
-
-    section.header:ClearAllPoints()
-    section.header:SetPoint("TOPLEFT", anchor, "BOTTOMLEFT", 0, -14)
-    section.header:Show()
-    section.label:SetText(("CURRENT RUN \226\128\148 %s"):format((run.name or "Unknown"):upper()))
-    section.summary:SetText(Coffer:FormatDuration(time() - run.startTime))
-
-    local visible = not section.collapsed
-    for _, row in ipairs(section.body) do
-        row:SetShown(visible)
-    end
-    if not visible then
-        return section.header, SECTION_HEADER_STEP
-    end
-
-    local net = run.loot + run.quest + run.vendor - run.spent
-    local color = net >= 0 and GREEN or RED
-    curRunEarnedValue:SetText(Coffer:FormatSignedMoney(net))
-    curRunEarnedValue:SetTextColor(color[1], color[2], color[3])
-
-    return section.bottom, SECTION_HEADER_STEP + (#section.body * ROW_STEP)
-end
-
-local function SortedItems()
-    local list = {}
-    for itemID, entry in pairs(Coffer.db.session.items) do
-        list[#list + 1] = { itemID = itemID, entry = entry }
-    end
-    table.sort(list, function(a, b)
-        return (a.entry.value or 0) * a.entry.count > (b.entry.value or 0) * b.entry.count
-    end)
-    return list
-end
-
-local function LayoutItems(anchor)
-    itemsSection.header:ClearAllPoints()
-    itemsSection.header:SetPoint("TOPLEFT", anchor, "BOTTOMLEFT", 0, -14)
-    local cursor = itemsSection.header
-    local heightUsed = SECTION_HEADER_STEP
-
-    local list = SortedItems()
-    itemsSection.summary:SetText(Coffer:FormatGoldIcon(Coffer:GetSessionItemsValue()))
-
-    if not itemsSection.collapsed then
-        for i = 1, math.min(#list, MAX_VISIBLE_ITEMS) do
-            local data = list[i]
-            local row = AcquireRow(itemRows, frame)
-            row:ClearAllPoints()
-            row:SetPoint("TOPLEFT", cursor, "BOTTOMLEFT", 0, -2)
-            row.icon:SetTexture(GetItemIcon and GetItemIcon(data.itemID) or 134400)
-            local name, _, quality = GetItemInfo(data.itemID)
-            local r, g, b = Coffer:GetQualityColor(quality)
-            row.name:SetTextColor(r, g, b)
-            row.name:SetText((name or ("item:" .. data.itemID)) .. (data.entry.count > 1 and ("  x" .. data.entry.count) or ""))
-            row.name:SetWidth(PANEL_WIDTH - PADDING * 2 - 60)
-            if data.entry.value then
-                row.value:SetText(Coffer:FormatGoldIcon(data.entry.value * data.entry.count))
-            else
-                row.value:SetText("...")
-            end
-            cursor = row
-            heightUsed = heightUsed + ROW_STEP
-        end
-        ReleaseUnused(itemRows)
-
-        if #list > MAX_VISIBLE_ITEMS then
-            itemsSection.more:ClearAllPoints()
-            itemsSection.more:SetPoint("TOPLEFT", cursor, "BOTTOMLEFT", 19, -2)
-            itemsSection.more:SetText("and " .. (#list - MAX_VISIBLE_ITEMS) .. " more")
-            itemsSection.more:Show()
-            cursor = itemsSection.more
-            heightUsed = heightUsed + MORE_LINE_STEP
-        else
-            itemsSection.more:Hide()
-        end
-    else
-        ReleaseUnused(itemRows)
-        itemsSection.more:Hide()
-    end
-
-    return cursor, heightUsed
-end
-
-local function LayoutRuns(anchor)
-    runsSection.header:ClearAllPoints()
-    runsSection.header:SetPoint("TOPLEFT", anchor, "BOTTOMLEFT", 0, -14)
-    local cursor = runsSection.header
-    local heightUsed = SECTION_HEADER_STEP
-
-    local runs = Coffer.db.runs
-    runsSection.summary:SetText(#runs == 1 and "1 run" or (#runs .. " runs"))
-
-    if not runsSection.collapsed then
-        for i = 1, math.min(#runs, MAX_VISIBLE_RUNS) do
-            local run = runs[i]
-            local row = AcquireRow(runRows, frame)
-            row:ClearAllPoints()
-            row:SetPoint("TOPLEFT", cursor, "BOTTOMLEFT", 0, -2)
-            row.icon:SetTexture("Interface\\Icons\\INV_Misc_PocketWatch_01")
-            row.name:SetTextColor(WHITE[1], WHITE[2], WHITE[3])
-            row.name:SetText(Coffer:FormatDuration(run.duration) .. "  " .. (run.name or "Unknown"))
-            row.name:SetWidth(PANEL_WIDTH - PADDING * 2 - 60)
-            local net = run.loot + run.quest + run.vendor - run.spent
-            local color = net >= 0 and GREEN or RED
-            row.value:SetText(Coffer:FormatSignedMoney(net))
-            row.value:SetTextColor(color[1], color[2], color[3])
-            cursor = row
-            heightUsed = heightUsed + ROW_STEP
-        end
-        ReleaseUnused(runRows)
-    else
-        ReleaseUnused(runRows)
-    end
-
-    return cursor, heightUsed
-end
-
-local function RefreshUIImpl()
-    if not frame or not frame:IsShown() or not Coffer.db then return end
-
-    gphValue:SetText(Coffer:FormatGoldIcon(Coffer:GetGoldPerHour()) .. "/hr")
-    goldValue:SetText(Coffer:FormatMoney(GetMoney()))
-
-    frame.sessionSection.summary:SetText(Coffer:FormatDuration(Coffer:GetSessionDuration()))
-    earnedValue:SetText(Coffer:FormatSignedGoldIcon(Coffer:GetSessionEarned()))
-    earnedValue:SetTextColor(GREEN[1], GREEN[2], GREEN[3])
-    local itemsValue = Coffer:GetSessionItemsValue()
-    sessionItemsValue:SetText(Coffer:FormatSignedGoldIcon(itemsValue))
-    sessionItemsValue:SetTextColor(GREEN[1], GREEN[2], GREEN[3])
-    spentValue:SetText(Coffer:FormatSignedGoldIcon(-Coffer.db.session.spent))
-    spentValue:SetTextColor(RED[1], RED[2], RED[3])
-    local net = Coffer:GetSessionNet()
-    netValue:SetText(Coffer:FormatSignedGoldIcon(net))
-    local netColor = net >= 0 and GREEN or RED
-    netValue:SetTextColor(netColor[1], netColor[2], netColor[3])
-
-    for _, row in ipairs(frame.sessionSection.body) do
-        row:SetShown(not frame.sessionSection.collapsed)
-    end
-
-    local afterCurrentRun, currentRunHeight = LayoutCurrentRun(frame.goldRow)
-    frame.sessionSection.header:ClearAllPoints()
-    frame.sessionSection.header:SetPoint("TOPLEFT", afterCurrentRun, "BOTTOMLEFT", 0, -14)
-
-    local afterSession = frame.sessionSection.collapsed and frame.sessionSection.header or frame.sessionSection.bottom
-    local sessionHeight = SECTION_HEADER_STEP
-    if not frame.sessionSection.collapsed then
-        sessionHeight = sessionHeight + (#frame.sessionSection.body * ROW_STEP)
-    end
-    local afterItems, itemsHeight = LayoutItems(afterSession)
-    local afterRuns, runsHeight = LayoutRuns(afterItems)
-
-    -- Deliberately NOT measured via frame:GetTop()/GetBottom(): a newly
-    -- created/anchored frame's resolved screen geometry isn't guaranteed available
-    -- synchronously, or even within a short defer, on every client (confirmed against
-    -- Warcraft Wiki's IsRectValid documentation and Blizzard forum reports - this is a
-    -- known, documented WoW quirk, not specific to this addon). Computed arithmetically
-    -- instead, from the same step constants used for anchoring above, so it never
-    -- depends on the engine's layout-resolution timing at all.
-    local totalHeight = TOP_CHROME_HEIGHT + ROW_HEIGHT + GOLD_ROW_STEP
-        + currentRunHeight + sessionHeight + itemsHeight + runsHeight
-        + PADDING
-    frame:SetHeight(totalHeight)
-end
-
--- Every refresh (the 2s ticker, every money/loot/run event, manual toggles) goes
--- through this pcall wrapper, so a bug in the layout code prints a visible error once
--- instead of either silently doing nothing or, on the ticker, spamming the same error
--- every 2 seconds forever.
-local lastUIError
-function Coffer:RefreshUI()
-    local ok, err = pcall(RefreshUIImpl)
-    if not ok and err ~= lastUIError then
-        lastUIError = err
-        print("|cffff0000Coffer UI error:|r " .. tostring(err))
-        print("|cffff0000Coffer:|r please report this error (and your /coffer debug output) so it can be fixed.")
-    end
 end
 
 local function EnsureFrame()
     if frame then return true end
     local ok, err = pcall(BuildFrame)
     if not ok then
-        print("|cffff0000Coffer failed to build its panel:|r " .. tostring(err))
-        print("|cffff0000Coffer:|r please report this error (and your /coffer debug output) so it can be fixed.")
+        Coffer:ReportError("building the panel", err)
         return false
     end
     return true
 end
 
-function Coffer:ToggleFrame()
-    if not EnsureFrame() then return end
-    if frame:IsShown() then
-        frame:Hide()
-    else
+-- Visibility is remembered between sessions.
+function Coffer:SetPanelShown(shown)
+    self.db.settings.hidden = not shown
+    if shown then
+        if not EnsureFrame() then return end
         frame:Show()
+        StartTicker()
         self:RefreshUI()
+    elseif frame then
+        frame:Hide()
+        if not self.hintedReopen then
+            self.hintedReopen = true
+            print("|cffffd200Coffer:|r hidden. Type /coffer to show it again.")
+        end
     end
 end
 
--- Builds the panel if needed and always shows it (never toggles it closed). Used by
--- /coffer debug so running that command can never itself hide an already-open panel.
+function Coffer:ToggleFrame()
+    self:SetPanelShown(not (frame and frame:IsShown()))
+end
+
 function Coffer:ForceShowPanel()
-    if not EnsureFrame() then return false end
-    frame:Show()
-    self:RefreshUI()
-    return true
+    self:SetPanelShown(true)
+    return frame ~= nil
 end
 
 function Coffer:GetPanelGeometry()
     if not frame then return nil end
-    return {
-        width = frame:GetWidth(),
-        height = frame:GetHeight(),
-        left = frame:GetLeft(),
-        top = frame:GetTop(),
-        shown = frame:IsShown(),
-        visible = frame:IsVisible(),
-        strata = frame:GetFrameStrata(),
-        alpha = frame:GetAlpha(),
-    }
+    return { width = frame:GetWidth(), height = frame:GetHeight(), shown = frame:IsShown() }
 end
 
--- A dedicated, scrollable, selectable text window for /coffer debug output. Chat
--- scrollback is unreliable for this: it can be buried by other chat traffic, and
--- there's no reliable way to know whether you've seen the end of the output or not.
--- This window always shows the complete text, independent of chat entirely.
+Coffer:OnReady(function(self)
+    if not self.db.settings.hidden then
+        self:SetPanelShown(true)
+    end
+    -- the addon dropdown next to the minimap on modern clients
+    if AddonCompartmentFrame and AddonCompartmentFrame.RegisterAddon then
+        pcall(AddonCompartmentFrame.RegisterAddon, AddonCompartmentFrame, {
+            text = "Coffer",
+            icon = "Interface\\Icons\\INV_Misc_Coin_01",
+            notCheckable = true,
+            func = function() Coffer:ToggleFrame() end,
+        })
+    end
+end)
+
+-- ---------------------------------------------------------------------------
+-- Debug window (/coffer debug)
+-- ---------------------------------------------------------------------------
+-- A scrollable, selectable window rather than chat, which heavy chat traffic can bury.
+
 local debugWindow
-local function ShowDebugText(text)
+function Coffer:ShowDebugText(text)
     if not debugWindow then
-        local f = CreateFrame("Frame", "CofferDebugFrame", UIParent)
+        local f = Box(UIParent, "CofferDebugFrame", 0.98)
         f:SetSize(520, 420)
         f:SetPoint("CENTER")
         f:SetFrameStrata("DIALOG")
@@ -583,69 +855,39 @@ local function ShowDebugText(text)
         f:SetScript("OnDragStart", f.StartMoving)
         f:SetScript("OnDragStop", f.StopMovingOrSizing)
 
-        local bg = f:CreateTexture(nil, "BACKGROUND")
-        bg:SetAllPoints()
-        bg:SetColorTexture(0.05, 0.05, 0.06, 0.98)
+        local title = Text(f, 13, COLORS.gold, "OUTLINE")
+        title:SetPoint("TOPLEFT", 12, -10)
+        title:SetText("Coffer debug - Ctrl+A, Ctrl+C to copy")
 
-        local titleText = f:CreateFontString(nil, "OVERLAY")
-        SetFont(titleText, 13, GOLD, "OUTLINE")
-        titleText:SetPoint("TOPLEFT", 12, -10)
-        titleText:SetText("Coffer Debug - select all (Ctrl+A) and copy (Ctrl+C)")
+        local close = CreateFrame("Button", nil, f)
+        close:SetSize(20, 20)
+        close:SetPoint("TOPRIGHT", -6, -6)
+        close.text = Text(close, 14, COLORS.muted)
+        close.text:SetPoint("CENTER")
+        close.text:SetText("x")
+        close:SetScript("OnClick", function() f:Hide() end)
 
-        local closeBtn = CreateFrame("Button", nil, f)
-        closeBtn:SetSize(20, 20)
-        closeBtn:SetPoint("TOPRIGHT", -6, -6)
-        local closeLbl = closeBtn:CreateFontString(nil, "OVERLAY")
-        SetFont(closeLbl, 14, MUTED)
-        closeLbl:SetPoint("CENTER")
-        closeLbl:SetText("x")
-        closeBtn:SetScript("OnClick", function() f:Hide() end)
-
-        local scrollFrame = CreateFrame("ScrollFrame", nil, f)
-        scrollFrame:SetPoint("TOPLEFT", 12, -32)
-        scrollFrame:SetPoint("BOTTOMRIGHT", -12, 12)
-        scrollFrame:EnableMouseWheel(true)
-        scrollFrame:SetScript("OnMouseWheel", function(self, delta)
+        local scroll = CreateFrame("ScrollFrame", nil, f)
+        scroll:SetPoint("TOPLEFT", 12, -32)
+        scroll:SetPoint("BOTTOMRIGHT", -12, 12)
+        scroll:EnableMouseWheel(true)
+        scroll:SetScript("OnMouseWheel", function(self, delta)
             self:SetVerticalScroll(math.max(0, (self:GetVerticalScroll() or 0) - delta * 20))
         end)
 
-        local editBox = CreateFrame("EditBox", nil, scrollFrame)
-        editBox:SetMultiLine(true)
-        editBox:SetFontObject(ChatFontNormal or GameFontNormal)
-        editBox:SetWidth(480)
-        editBox:SetAutoFocus(false)
-        editBox:SetScript("OnEscapePressed", function() f:Hide() end)
-        scrollFrame:SetScrollChild(editBox)
+        local edit = CreateFrame("EditBox", nil, scroll)
+        edit:SetMultiLine(true)
+        edit:SetFontObject(ChatFontNormal or GameFontNormal)
+        edit:SetWidth(480)
+        edit:SetAutoFocus(false)
+        edit:SetScript("OnEscapePressed", function() f:Hide() end)
+        scroll:SetScrollChild(edit)
 
-        f.editBox = editBox
+        f.edit = edit
         debugWindow = f
     end
-
-    debugWindow.editBox:SetText(text)
-    debugWindow.editBox:HighlightText()
-    debugWindow.editBox:SetFocus()
+    debugWindow.edit:SetText(text)
+    debugWindow.edit:HighlightText()
+    debugWindow.edit:SetFocus()
     debugWindow:Show()
 end
-Coffer.ShowDebugText = function(self, text) ShowDebugText(text) end
-
-if StaticPopupDialogs then
-    StaticPopupDialogs["COFFER_CONFIRM_RESET"] = {
-        text = "Reset Coffer's current session? Recent run history is kept.",
-        button1 = "Reset",
-        button2 = "Cancel",
-        OnAccept = function() Coffer:ResetSession() end,
-        timeout = 0,
-        whileDead = true,
-        hideOnEscape = true,
-    }
-end
-
-Coffer:RegisterCallback("MoneyChanged", function() Coffer:RefreshUI() end)
-Coffer:RegisterCallback("ItemsChanged", function() Coffer:RefreshUI() end)
-Coffer:RegisterCallback("RunsChanged", function() Coffer:RefreshUI() end)
-Coffer:RegisterCallback("ActiveRunChanged", function() Coffer:RefreshUI() end)
-Coffer:RegisterCallback("SessionReset", function() Coffer:RefreshUI() end)
-
-Coffer:OnReady(function()
-    Coffer:ToggleFrame()
-end)

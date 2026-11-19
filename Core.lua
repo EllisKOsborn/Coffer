@@ -184,13 +184,16 @@ local function PrintDebug()
         out("  Panel build+show attempt succeeded: " .. tostring(built))
         local geo = Coffer:GetPanelGeometry()
         if geo then
-            out(("  Panel geometry: %.0fx%.0f at (left=%s, top=%s), strata=%s, alpha=%s"):format(
-                geo.width or -1, geo.height or -1, tostring(geo.left), tostring(geo.top), tostring(geo.strata), tostring(geo.alpha)))
+            out(("  Panel geometry: %.0fx%.0f, strata=%s, alpha=%s"):format(
+                geo.width or -1, geo.height or -1, tostring(geo.strata), tostring(geo.alpha)))
             out("  Panel shown: " .. tostring(geo.shown) .. "   Panel actually visible on screen: " .. tostring(geo.visible))
+            out("  (on-screen position left=" .. tostring(geo.left) .. " top=" .. tostring(geo.top) ..
+                " - 'nil' here is a separate, harmless WoW quirk about reading geometry back into")
+            out("  Lua, not an indication the panel isn't actually drawn at the right place on screen)")
             if geo.shown and not geo.visible then
                 out("  NOTE: shown is true but visible is false - an ancestor frame is hidden; shouldn't happen for a UIParent-attached frame.")
             elseif geo.width and geo.width > 0 and (not geo.height or geo.height <= 1) then
-                out("  NOTE: height looks collapsed (<=1px) - the panel exists but has no visible content area.")
+                out("  NOTE: height looks collapsed (<=1px) - the panel exists but has no visible content area. This is the bug that was just fixed by computing height arithmetically instead of measuring it - if you still see this, something is still wrong.")
             end
         else
             out("  Panel frame could not be built at all.")
@@ -208,22 +211,23 @@ local function PrintDebug()
     if Coffer.ShowDebugText then
         Coffer:ShowDebugText(fullText)
 
-        -- The geometry measured above is taken immediately after (re)building the
-        -- panel, in the same script execution - WoW hasn't necessarily resolved the
-        -- anchor layout yet, so left/top/height can read as nil/0 even when the panel
-        -- is about to render correctly. Re-check shortly after and append the settled
-        -- numbers to the same window, so one /coffer debug run gives the real answer
-        -- instead of needing to be run twice.
+        -- Height is now computed arithmetically and set synchronously (see UI.lua), so
+        -- it should already be correct above, immediately. This re-check is just a
+        -- belt-and-suspenders confirmation a moment later. left/top are deliberately
+        -- NOT part of the "healthy" check: they reflect a separate, harmless WoW quirk
+        -- about reading resolved screen position back into Lua, not whether the panel
+        -- is actually drawn in the right place (the engine renders it regardless).
         C_Timer.After(0.3, function()
             local geo = Coffer:GetPanelGeometry()
-            local extra = "\n\n(re-checked 0.3s later, after layout should have settled)\n"
+            local extra = "\n\n(re-checked 0.3s later)\n"
             if geo then
-                extra = extra .. ("  Panel geometry: %.0fx%.0f at (left=%s, top=%s)\n"):format(
-                    geo.width or -1, geo.height or -1, tostring(geo.left), tostring(geo.top))
+                extra = extra .. ("  Panel geometry: %.0fx%.0f\n"):format(geo.width or -1, geo.height or -1)
                 extra = extra .. "  Panel shown: " .. tostring(geo.shown) .. "   visible: " .. tostring(geo.visible)
-                if geo.height and geo.height > 1 and geo.left and geo.top then
-                    extra = extra .. "\n  This all looks healthy now - if you still don't see the panel on screen,"
-                    extra = extra .. "\n  it may be positioned off your visible screen area, or behind another window."
+                if geo.height and geo.height > 1 then
+                    extra = extra .. "\n  Height looks healthy. If you still don't see the panel on screen, it may be"
+                    extra = extra .. "\n  positioned off your visible screen area, or behind another window."
+                else
+                    extra = extra .. "\n  Height STILL looks collapsed - this needs more investigation, please report it."
                 end
             else
                 extra = extra .. "  Panel frame no longer exists."

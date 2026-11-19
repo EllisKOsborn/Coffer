@@ -223,22 +223,20 @@ if not ok then
 end
 print("/coffer (toggle) OK -- panel exists: " .. tostring(_G.CofferFrame ~= nil) .. ", shown: " .. tostring(_G.CofferFrame and _G.CofferFrame:IsShown()))
 
--- This is the exact bug found from the user's real debug output: geometry read in the
--- same script execution that just built/anchored the panel must come back unresolved
--- (nil/never-set), and the deferred C_Timer.After callback that fixes it must still be
--- sitting queued, not yet run.
-assertEqual("frame height NOT YET set (still queued in a deferred callback)", _G.CofferFrame.height, nil)
-assertEqual("frame top NOT YET resolved (geometry unresolved before layout)", _G.CofferFrame:GetTop(), nil)
-
-__FlushLayout() -- simulate the next rendered frame actually happening
-
-assertEqual("frame top resolves after a simulated layout pass", _G.CofferFrame:GetTop() ~= nil, true)
-assertEqual("frame height gets set once geometry resolves", _G.CofferFrame.height ~= nil, true)
+-- This is the second real bug found from the user's actual debug output: frame height
+-- is computed from frame:GetTop()/GetBottom(), which (per Warcraft Wiki's IsRectValid
+-- docs and Blizzard forum reports) are not guaranteed to resolve synchronously, or even
+-- after a short defer, on every client - confirmed live: the user's debug output still
+-- showed height 0 even 0.3s after building. The fix computes height arithmetically from
+-- known constants instead, so it must be correct IMMEDIATELY, synchronously, with zero
+-- dependency on GetTop()/GetBottom()/__FlushLayout() ever resolving anything.
+assertEqual("frame top is UNRESOLVED (the known-broken WoW API, left this way on purpose)", _G.CofferFrame:GetTop(), nil)
+assertEqual("frame height is nonetheless set correctly, synchronously, with no flush needed", _G.CofferFrame.height ~= nil, true)
 if _G.CofferFrame.height <= 1 then
-    print("ASSERTION FAILED: frame height is still collapsed (<=1px) after layout settled")
+    print("ASSERTION FAILED: frame height is collapsed (<=1px) despite the arithmetic fix")
     os.exit(1)
 end
-print("ASSERT OK: frame height is a real, non-collapsed value (" .. tostring(_G.CofferFrame.height) .. "px)")
+print("ASSERT OK: frame height is a real, non-collapsed value (" .. tostring(_G.CofferFrame.height) .. "px), computed without ever calling GetTop/GetBottom")
 
 -- Simulate /coffer debug
 local ok2, err2 = pcall(function() SlashCmdList["COFFER"]("debug") end)

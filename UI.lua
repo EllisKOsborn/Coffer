@@ -6,6 +6,17 @@ local ROW_HEIGHT = 18
 local MAX_VISIBLE_ITEMS = 8
 local MAX_VISIBLE_RUNS = 8
 
+-- Pixel heights consumed by each kind of element, mirroring the literal offsets used
+-- in the SetPoint calls below exactly (e.g. a row is anchored "-2" below the previous
+-- one and is ROW_HEIGHT tall, so ROW_STEP = 2 + ROW_HEIGHT). These feed SetHeight
+-- directly via arithmetic - see the note on GetTop()/GetBottom() further down for why
+-- this panel's height is computed this way instead of measuring the frames themselves.
+local TOP_CHROME_HEIGHT = 12 + 18 + 10 -- icon top inset + icon height + gap to content
+local GOLD_ROW_STEP = 6 + ROW_HEIGHT    -- gap before "Your gold" + its own height
+local SECTION_HEADER_STEP = 14 + ROW_HEIGHT -- gap before a section header + its height
+local ROW_STEP = 2 + ROW_HEIGHT         -- gap before a body/item/run row + its height
+local MORE_LINE_STEP = 2 + 14           -- gap before a "more" label + its approx text height
+
 local GOLD = { 1, 0.82, 0 }
 local WHITE = { 0.92, 0.92, 0.92 }
 local MUTED = { 0.6, 0.6, 0.6 }
@@ -294,6 +305,9 @@ local function BuildFrame()
     end)
 end
 
+-- Returns (cursor, heightUsed): cursor is the frame later elements anchor below, and
+-- heightUsed is the exact pixel height this section consumed, computed arithmetically
+-- (see the constants above) rather than measured back from the frames afterward.
 local function LayoutCurrentRun(anchor)
     local section = frame.currentRunSection
     local run = Coffer:GetActiveRun()
@@ -303,7 +317,7 @@ local function LayoutCurrentRun(anchor)
         for _, row in ipairs(section.body) do
             row:Hide()
         end
-        return anchor
+        return anchor, 0
     end
 
     section.header:ClearAllPoints()
@@ -316,7 +330,7 @@ local function LayoutCurrentRun(anchor)
         row:SetShown(visible)
     end
     if not visible then
-        return section.header
+        return section.header, SECTION_HEADER_STEP
     end
 
     curRunDurationValue:SetText(Coffer:FormatDuration(time() - run.startTime))
@@ -325,7 +339,7 @@ local function LayoutCurrentRun(anchor)
     curRunEarnedValue:SetText(Coffer:FormatSigned(net))
     curRunEarnedValue:SetTextColor(color[1], color[2], color[3])
 
-    return section.bottom
+    return section.bottom, SECTION_HEADER_STEP + (#section.body * ROW_STEP)
 end
 
 local function SortedItems()
@@ -343,6 +357,7 @@ local function LayoutItems(anchor)
     itemsSection.header:ClearAllPoints()
     itemsSection.header:SetPoint("TOPLEFT", anchor, "BOTTOMLEFT", 0, -14)
     local cursor = itemsSection.header
+    local heightUsed = SECTION_HEADER_STEP
 
     if not itemsSection.collapsed then
         local list = SortedItems()
@@ -363,6 +378,7 @@ local function LayoutItems(anchor)
                 row.value:SetText("...")
             end
             cursor = row
+            heightUsed = heightUsed + ROW_STEP
         end
         ReleaseUnused(itemRows)
 
@@ -372,6 +388,7 @@ local function LayoutItems(anchor)
             itemsSection.more:SetText("and " .. (#list - MAX_VISIBLE_ITEMS) .. " more")
             itemsSection.more:Show()
             cursor = itemsSection.more
+            heightUsed = heightUsed + MORE_LINE_STEP
         else
             itemsSection.more:Hide()
         end
@@ -380,13 +397,14 @@ local function LayoutItems(anchor)
         itemsSection.more:Hide()
     end
 
-    return cursor
+    return cursor, heightUsed
 end
 
 local function LayoutRuns(anchor)
     runsSection.header:ClearAllPoints()
     runsSection.header:SetPoint("TOPLEFT", anchor, "BOTTOMLEFT", 0, -14)
     local cursor = runsSection.header
+    local heightUsed = SECTION_HEADER_STEP
 
     if not runsSection.collapsed then
         local runs = Coffer.db.runs
@@ -404,6 +422,7 @@ local function LayoutRuns(anchor)
             row.value:SetText(Coffer:FormatSigned(net) .. "g")
             row.value:SetTextColor(color[1], color[2], color[3])
             cursor = row
+            heightUsed = heightUsed + ROW_STEP
         end
         ReleaseUnused(runRows)
 
@@ -413,6 +432,7 @@ local function LayoutRuns(anchor)
             runsSection.more:SetText(#runs .. " runs")
             runsSection.more:Show()
             cursor = runsSection.more
+            heightUsed = heightUsed + MORE_LINE_STEP
         else
             runsSection.more:Hide()
         end
@@ -421,7 +441,7 @@ local function LayoutRuns(anchor)
         runsSection.more:Hide()
     end
 
-    return cursor
+    return cursor, heightUsed
 end
 
 local function RefreshUIImpl()
@@ -444,28 +464,29 @@ local function RefreshUIImpl()
         row:SetShown(not frame.sessionSection.collapsed)
     end
 
-    local afterCurrentRun = LayoutCurrentRun(frame.goldRow)
+    local afterCurrentRun, currentRunHeight = LayoutCurrentRun(frame.goldRow)
     frame.sessionSection.header:ClearAllPoints()
     frame.sessionSection.header:SetPoint("TOPLEFT", afterCurrentRun, "BOTTOMLEFT", 0, -14)
 
     local afterSession = frame.sessionSection.collapsed and frame.sessionSection.header or frame.sessionSection.bottom
-    local afterItems = LayoutItems(afterSession)
-    local afterRuns = LayoutRuns(afterItems)
+    local sessionHeight = SECTION_HEADER_STEP
+    if not frame.sessionSection.collapsed then
+        sessionHeight = sessionHeight + (#frame.sessionSection.body * ROW_STEP)
+    end
+    local afterItems, itemsHeight = LayoutItems(afterSession)
+    local afterRuns, runsHeight = LayoutRuns(afterItems)
 
-    -- GetTop()/GetBottom() can return nil when called in the same script execution
-    -- that just anchored these frames - WoW hasn't run a layout pass yet, so the
-    -- geometry isn't resolved. This bit us for real: the panel built and showed
-    -- successfully but ended up with height 0 (no visible background/border) because
-    -- this measurement silently failed every time. Deferring one tick (0 seconds,
-    -- i.e. "next frame") gives the engine a chance to resolve the anchors first.
-    local measureFrame, measureBottom = frame, afterRuns
-    C_Timer.After(0, function()
-        local top = measureFrame:GetTop()
-        local bottom = measureBottom:GetBottom()
-        if top and bottom then
-            measureFrame:SetHeight((top - bottom) + PADDING)
-        end
-    end)
+    -- Deliberately NOT measured via frame:GetTop()/GetBottom(): a newly
+    -- created/anchored frame's resolved screen geometry isn't guaranteed available
+    -- synchronously, or even within a short defer, on every client (confirmed against
+    -- Warcraft Wiki's IsRectValid documentation and Blizzard forum reports - this is a
+    -- known, documented WoW quirk, not specific to this addon). Computed arithmetically
+    -- instead, from the same step constants used for anchoring above, so it never
+    -- depends on the engine's layout-resolution timing at all.
+    local totalHeight = TOP_CHROME_HEIGHT + ROW_HEIGHT + GOLD_ROW_STEP
+        + currentRunHeight + sessionHeight + itemsHeight + runsHeight
+        + PADDING
+    frame:SetHeight(totalHeight)
 end
 
 -- Every refresh (the 2s ticker, every money/loot/run event, manual toggles) goes

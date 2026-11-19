@@ -421,19 +421,19 @@ local function LayoutRuns(anchor)
     return cursor
 end
 
-function Coffer:RefreshUI()
-    if not frame or not frame:IsShown() or not self.db then return end
+local function RefreshUIImpl()
+    if not frame or not frame:IsShown() or not Coffer.db then return end
 
-    gphValue:SetText(self:FormatGold(self:GetGoldPerHour()) .. "g/hr")
-    goldValue:SetText(self:FormatMoney(GetMoney()))
+    gphValue:SetText(Coffer:FormatGold(Coffer:GetGoldPerHour()) .. "g/hr")
+    goldValue:SetText(Coffer:FormatMoney(GetMoney()))
 
-    durationValue:SetText(self:FormatDuration(self:GetSessionDuration()))
-    earnedValue:SetText("+" .. self:FormatGold(self:GetSessionEarned()))
+    durationValue:SetText(Coffer:FormatDuration(Coffer:GetSessionDuration()))
+    earnedValue:SetText("+" .. Coffer:FormatGold(Coffer:GetSessionEarned()))
     earnedValue:SetTextColor(GREEN[1], GREEN[2], GREEN[3])
-    spentValue:SetText("-" .. self:FormatGold(self.db.session.spent))
+    spentValue:SetText("-" .. Coffer:FormatGold(Coffer.db.session.spent))
     spentValue:SetTextColor(RED[1], RED[2], RED[3])
-    local net = self:GetSessionNet()
-    netValue:SetText(self:FormatSigned(net))
+    local net = Coffer:GetSessionNet()
+    netValue:SetText(Coffer:FormatSigned(net))
     local netColor = net >= 0 and GREEN or RED
     netValue:SetTextColor(netColor[1], netColor[2], netColor[3])
 
@@ -454,6 +454,20 @@ function Coffer:RefreshUI()
     local bottom = afterRuns:GetBottom()
     if top and bottom then
         frame:SetHeight((top - bottom) + PADDING)
+    end
+end
+
+-- Every refresh (the 2s ticker, every money/loot/run event, manual toggles) goes
+-- through this pcall wrapper, so a bug in the layout code prints a visible error once
+-- instead of either silently doing nothing or, on the ticker, spamming the same error
+-- every 2 seconds forever.
+local lastUIError
+function Coffer:RefreshUI()
+    local ok, err = pcall(RefreshUIImpl)
+    if not ok and err ~= lastUIError then
+        lastUIError = err
+        print("|cffff0000Coffer UI error:|r " .. tostring(err))
+        print("|cffff0000Coffer:|r please report this error (and your /coffer debug output) so it can be fixed.")
     end
 end
 

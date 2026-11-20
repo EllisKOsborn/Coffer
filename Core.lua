@@ -8,14 +8,14 @@ Coffer.VERSION = (GetAddOnMetadata and GetAddOnMetadata(addonName, "Version")) o
 -- Saved data
 -- ---------------------------------------------------------------------------
 
-local SCHEMA = 2
+local SCHEMA = 3
 
 -- CofferDB is per character: session totals, run history, panel settings.
 -- session.duration is *online* seconds only (banked on logout/reload), so time spent
 -- logged off never dilutes gold per hour.
 local DEFAULTS = {
     schema = SCHEMA,
-    session = { duration = 0, loot = 0, quest = 0, vendor = 0, spent = 0, kills = 0, items = {} },
+    session = { duration = 0, loot = 0, quest = 0, vendor = 0, ahSales = 0, spent = 0, kills = 0, items = {} },
     runs = {},
     settings = { locked = false, hidden = false, valuation = "auction", collapsed = {} },
 }
@@ -36,15 +36,20 @@ local function ApplyDefaults(defaults, target)
     return target
 end
 
--- Schema 1 timed sessions from a wall-clock start (offline time included) and counted
--- vendor sales as income; neither carries over meaningfully, so that session is
--- restarted. Run history is kept.
 local function Migrate(db)
-    if type(db) == "table" and (db.schema or 1) < SCHEMA then
+    if type(db) ~= "table" then return end
+    local schema = db.schema or 1
+    if schema < 2 then
+        -- Schema 1 timed sessions from a wall-clock start (offline time included); that
+        -- session can't be converted, so it's restarted. Run history is kept.
         db.session = nil
-        db.schema = SCHEMA
         Coffer.migratedSession = true
+    elseif schema < 3 and type(db.session) == "table" then
+        -- Schema 2 recorded vendor sales without removing the sold items from the item
+        -- tally; counting those sales as income now would count those items twice.
+        db.session.vendor = 0
     end
+    db.schema = SCHEMA
 end
 
 -- ---------------------------------------------------------------------------
@@ -238,8 +243,8 @@ local function PrintDebug()
         if Coffer.db then
             local s = Coffer.db.session
             out("Session online time: " .. Coffer:FormatDuration(Coffer:GetSessionDuration()))
-            out(("Loot %d  Quest %d  Items %d  Spent %d  Vendor %d  (copper)"):format(
-                s.loot, s.quest, Coffer:GetSessionItemsValue(), s.spent, s.vendor))
+            out(("Loot %d  Quest %d  Vendor %d  AH %d  Items %d  Spent %d  (copper)"):format(
+                s.loot, s.quest, s.vendor, s.ahSales, Coffer:GetSessionItemsValue(), s.spent))
             out("Distinct items: " .. CountKeys(s.items) .. "   Kills: " .. s.kills)
             out("Item valuation: " .. Coffer.db.settings.valuation)
             out("Runs recorded: " .. #Coffer.db.runs .. "   Active run: " .. tostring(Coffer.db.activeRun and Coffer.db.activeRun.name))

@@ -25,24 +25,27 @@ end
 -- ---------------------------------------------------------------------------
 -- Totals
 -- ---------------------------------------------------------------------------
--- Same convention as both reference addons (checked against the Fojicore panel's own
--- numbers: (331 earned + 233 items) / 51h15m = 11.0 gold/hour, and 331 + 233 - 374 =
--- its 190-191 total):
 --   earned   = looted gold + quest gold
---   items    = value of items looted
---   income   = earned + items                 -> gold per hour
+--   sold     = gold from selling to vendors and on the auction house
+--   items    = value of looted items you still have (not sold yet)
+--   income   = earned + sold + items          -> gold per hour
 --   total    = income - spent
--- Gold from selling looted items to a vendor is NOT income - its value was already
--- counted as an item when it was looted. It's recorded separately (session.vendor) for
--- information only.
+-- Selling a looted item moves it from "items" to "sold": it leaves the item tally (see
+-- Sales.lua) as its sale gold arrives, so it's counted exactly once, at what it actually
+-- sold for. Selling something you didn't loot this session is simply income.
 
 function Coffer:GetSessionEarned()
     local session = self.db.session
     return session.loot + session.quest
 end
 
+function Coffer:GetSessionSold()
+    local session = self.db.session
+    return session.vendor + session.ahSales
+end
+
 function Coffer:GetSessionIncome()
-    return self:GetSessionEarned() + self:GetSessionItemsValue()
+    return self:GetSessionEarned() + self:GetSessionSold() + self:GetSessionItemsValue()
 end
 
 function Coffer:GetSessionNet()
@@ -59,7 +62,7 @@ end
 
 function Coffer:ResetSession()
     local session = self.db.session
-    session.loot, session.quest, session.vendor, session.spent, session.kills = 0, 0, 0, 0, 0
+    session.loot, session.quest, session.vendor, session.ahSales, session.spent, session.kills = 0, 0, 0, 0, 0, 0
     session.duration = 0
     wipe(session.items)
     onlineSince = time()
@@ -142,6 +145,10 @@ function Coffer:IsAcquiringNotLooting()
     return next(open) ~= nil
 end
 
+function Coffer:IsWindowOpen(kind)
+    return open[kind] == true
+end
+
 -- A missed close event must not leave items uncounted indefinitely: opening a loot window
 -- or zoning means those windows aren't open any more.
 local function ClearOpenWindows()
@@ -158,8 +165,10 @@ end)
 
 -- PLAYER_MONEY fires for every balance change, including the loot and quest gold
 -- already counted above. Left for it to classify:
---   increase at a merchant   -> vendor sale (informational, not income - see Totals)
---   other increases          -> already counted, or not farming income (mail, trade)
+--   increase at a merchant   -> vendor sale (which item it was: Sales.lua)
+--   other increases          -> already counted (loot, quests, auction sales collected
+--                               from the mailbox: Sales.lua), or not farming income
+--                               (gold mailed or traded to you)
 --   decrease at mail/trade   -> moving gold to an alt or another player, not spending
 --   any other decrease       -> spent (repairs, purchases, training, AH, flights, ...)
 local lastMoney
@@ -175,6 +184,7 @@ Coffer:On("PLAYER_MONEY", function(self)
     if delta > 0 then
         if open.merchant then
             self.db.session.vendor = self.db.session.vendor + delta
+            self:TrackRunIncome("sold", delta)
             self:Changed()
         end
     elseif delta < 0 and not open.mail and not open.trade then

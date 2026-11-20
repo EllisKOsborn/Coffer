@@ -15,9 +15,10 @@ techniques and instance lockout tracker of
 
 - **Gold per hour**: (looted gold + quest gold + value of looted items) per hour,
   counting **online time only**. Time spent logged off doesn't dilute it.
-- **This session**: earned gold, item value, spending and net total, kept across
-  logouts until you start a new session.
-- **Items**: everything you loot, with stack counts and value. Values use
+- **This session**: looted and quest gold, vendor and auction house sales, the value
+  of items you still have, spending and net total, kept across logouts until you
+  start a new session.
+- **Items**: everything you loot or craft, with stack counts and value. Values use
   TradeSkillMaster or Auctionator market prices when installed, and never go below
   vendor price, since a vendor will always buy the item. Soulbound items fall back to
   vendor price automatically. A vendor-only mode is available.
@@ -87,13 +88,26 @@ changes in your gold:
   that arrive while one of those windows is open.
 - **Spending** is any drop in your gold, including auction house and vendor purchases,
   except gold mailed or traded away, which isn't spending.
-- **Vendor sales are not income.** A looted item's value was already counted when you
-  looted it, so selling it would count it twice. Sales are still shown in the session
-  tooltip.
+- **Selling and crafting move value, they never count it twice.** An item you loot
+  or craft counts at its value while you have it. When you sell it, it leaves Items and
+  the gold you actually got counts under Sold instead. When you craft with it, it
+  leaves Items and the crafted item counts instead. So 10 Runecloth looted shows as
+  their value, and once sold, as what they really sold for.
+  - Vendor sales: items that leave your bags while a vendor is open (right-click,
+    dragging, the sell-junk button and auto-sell addons alike).
+  - Auction house sales: read from the "Auction successful" mail's invoice (item,
+    quantity, gold) when you collect it. Gold mailed by your alts isn't a sale, and an
+    outbid refund gives back the bid counted as spent.
+  - Crafting: the "You create: ..." line, with the looted materials that left your bags
+    around it.
+  - Selling or crafting with things you didn't loot this session (yesterday's farm,
+    materials from your bank) has nothing to move, so it's simply a gain.
+  - Banking, mailing or posting an item on the AH doesn't remove it: you still have
+    it, or will once it sells.
 
-This is the same convention the Fojicore panel uses. Its own numbers check out: (331
-earned + 233 items) / 51h15m = 11.0 gold/hour, and 331 + 233 - 374 spent = its 191
-total.
+Totals: **Earned** (looted + quest gold), **Sold**, **Items** (value of loot and crafts
+you still have), **Spent**, and **Total** (all of it minus Spent). Gold per hour is
+everything except Spent, per hour online.
 
 **Kills and lockouts:** on Forever's client, addons get `UNIT_DIED` with enemy GUIDs as
 "secret" values, and can't use the combat log. KiwiFarm works the same way. Kills
@@ -114,7 +128,7 @@ against a mock of Forever's client. The mock is strict where the real client is:
 - calling a widget method that doesn't exist is an error
 - if Coffer reports any error through its own error handling, the run fails
 
-On top of that it plays a full farming session and makes 102 checks on the numbers,
+On top of that it plays a full farming session and makes 124 checks on the numbers,
 including `/reload`s, logout and login with saved data carried over, and a death
 mid-dungeon.
 
@@ -135,5 +149,7 @@ mail counted as spending, layout height drifting from placement, and open-world 
   them to Forever. If Forever's actual limits differ, they're two constants at the top
   of `Lockouts.lua`.
 - Open-world kills aren't counted (see above).
-- Gold received by mail or trade isn't counted as income, since it isn't farming
-  income.
+- Gold received by mail (other than auction sales) or trade isn't counted as income,
+  since it isn't farming income.
+- Materials from before the session count as free when you craft with them, so a
+  craft shows its full value. Materials bought this session are already in Spent.

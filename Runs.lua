@@ -26,10 +26,10 @@ function Coffer:GetRunDuration(run)
     return math.max(0, finish - run.startTime - (run.offline or 0))
 end
 
--- Same convention as the session: looted gold + quest gold + item value - spent.
+-- Same convention as the session: looted + quest + sold gold + item value - spent.
 function Coffer:GetRunNet(run)
     local items = run.itemsValue or self:GetRunItemsValue(run)
-    return (run.loot or 0) + (run.quest or 0) + items - (run.spent or 0)
+    return (run.loot or 0) + (run.quest or 0) + (run.sold or 0) + items - (run.spent or 0)
 end
 
 function Coffer:TrackRunIncome(bucket, amount)
@@ -56,7 +56,7 @@ local function StartRun(name, mapID)
         mapID = mapID,
         startTime = time(),
         offline = 0,
-        loot = 0, quest = 0, spent = 0, kills = 0,
+        loot = 0, quest = 0, sold = 0, spent = 0, kills = 0,
         items = {},
     }
     Coffer:Changed()
@@ -74,7 +74,7 @@ local function EndRun(endTime)
 
     -- Runs with no gold are kept (the reference panel shows them as "-"), but an
     -- accidental walk through a portal isn't a run.
-    local hadActivity = run.loot + run.quest > 0 or run.kills > 0 or next(run.items) ~= nil
+    local hadActivity = run.loot + run.quest + (run.sold or 0) > 0 or run.kills > 0 or next(run.items) ~= nil
     if run.duration >= MIN_RUN_SECONDS or hadActivity then
         local runs = Coffer.db.runs
         table.insert(runs, 1, run)

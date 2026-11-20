@@ -10,7 +10,7 @@
 -- Then it plays through a full farming session and asserts on the numbers.
 
 local addonDir = ...
-local FILES = { "Compat.lua", "Core.lua", "ItemValue.lua", "Money.lua", "Loot.lua", "Lockouts.lua", "Runs.lua", "UI.lua" }
+local FILES = { "Compat.lua", "Core.lua", "ItemValue.lua", "Money.lua", "Loot.lua", "Sales.lua", "Lockouts.lua", "Runs.lua", "UI.lua" }
 
 -- ---------------------------------------------------------------------------
 -- Test plumbing
@@ -264,8 +264,52 @@ _G.AddonCompartmentFrame = { RegisterAddon = function(_, info) compartment = inf
 _G.strtrim = function(s) return (s:gsub("^%s+", ""):gsub("%s+$", "")) end
 _G.wipe = function(t) for k in pairs(t) do t[k] = nil end return t end
 
--- logout hooks
-_G.Logout, _G.Quit, _G.CancelLogout = function() end, function() end, function() end
+-- Bags: one bag of 40 slots, item -> count
+local bags = {}
+local function bagList()
+    local ids = {}
+    for id in pairs(bags) do ids[#ids + 1] = id end
+    table.sort(ids)
+    local list = {}
+    for _, id in ipairs(ids) do list[#list + 1] = { id = id, count = bags[id] } end
+    return list
+end
+_G.NUM_BAG_SLOTS = 4
+_G.C_Container = {
+    GetContainerNumSlots = function(bag) return bag == 0 and 40 or 0 end,
+    GetContainerItemInfo = function(bag, slot)
+        local e = bag == 0 and bagList()[slot]
+        if e then return { itemID = e.id, stackCount = e.count } end
+    end,
+}
+local function bagAdd(id, n) bags[id] = (bags[id] or 0) + n end
+local function bagRemove(id, n)
+    bags[id] = bags[id] - n
+    if bags[id] <= 0 then bags[id] = nil end
+end
+
+-- Mailbox
+local mails = {}
+_G.GetInboxNumItems = function() return #mails, #mails end
+_G.GetInboxHeaderInfo = function(i)
+    local m = mails[i]
+    if m then return nil, nil, m.sender, m.subject, m.money end
+end
+_G.GetInboxInvoiceInfo = function(i)
+    local m = mails[i]
+    if m and m.invoiceType then return m.invoiceType, m.itemName, "Buyer", 0, 0, 0, 0, 0, 0, m.count end
+end
+
+-- Functions addons hook. Reset on every load, as a /reload starts a fresh Lua state
+-- with no hooks from before.
+local function resetHookables()
+    local function takeMoney(i)
+        local m = mails[i]
+        if m then money = money + m.money; m.money = 0 end
+    end
+    _G.TakeInboxMoney, _G.AutoLootMailItem = takeMoney, takeMoney
+    _G.Logout, _G.Quit, _G.CancelLogout = function() end, function() end, function() end
+end
 _G.hooksecurefunc = function(name, hook)
     local original = _G[name]
     _G[name] = function(...)
@@ -284,6 +328,9 @@ _G.SILVER_AMOUNT = "%d Silver"
 _G.COPPER_AMOUNT = "%d Copper"
 _G.INSTANCE_RESET_SUCCESS = "%s has been reset."
 _G.INSTANCE_RESET_FAILED = "Cannot reset %s.  There are players still inside the instance."
+_G.LOOT_ITEM_CREATED_SELF = "You create: %s."
+_G.LOOT_ITEM_CREATED_SELF_MULTIPLE = "You create: %sx%d."
+_G.AUCTION_OUTBID_MAIL_SUBJECT = "Outbid on %s"
 
 -- Forever doesn't have these as globals (C_Item / C_CurrencyInfo only).
 _G.GetItemInfo = nil
@@ -330,6 +377,7 @@ local Coffer
 -- SavedVariables (CofferDB / CofferAccountDB) carry over.
 local function load()
     eventFrames, pendingAfters, tickers = {}, {}, {}
+    resetHookables()
     _G.SlashCmdList = {}
     _G.CofferFrame, _G.CofferMenu, _G.CofferDebugFrame = nil, nil, nil
     Coffer = {}
@@ -372,6 +420,13 @@ local function fire(event, ...)
     flush()
 end
 
+-- Take a mail's gold: the client's hook-visible call, then the balance update the
+-- server sends back afterwards.
+local function collectMail(index)
+    TakeInboxMoney(index)
+    fire("PLAYER_MONEY")
+end
+
 local function link(id) return "|cffffffff|Hitem:" .. id .. "::::::::60:::::|h[Item " .. id .. "]|h|r" end
 
 -- ===========================================================================
@@ -388,11 +443,11 @@ load()
 check("Forever has no global GetItemInfo", _G.GetItemInfo, nil)
 check("old session discarded", Coffer.db.session.loot, 0)
 check("run history kept", Coffer.db.runs[1] and Coffer.db.runs[1].name, "Old Run")
-check("schema upgraded", Coffer.db.schema, 2)
+check("schema upgraded", Coffer.db.schema, 3)
 check("panel shown by default", CofferFrame and CofferFrame:IsShown(), true)
--- 40 top + 22 gph + 22 gold + 20 instances + 30 session header + 4 x 20 rows + 30 items
+-- 40 top + 22 gph + 22 gold + 20 instances + 30 session header + 5 x 20 rows + 30 items
 -- header + 16 empty note + 30 runs header + 20 one run row + 10 bottom
-check("panel height computed without GetTop/GetBottom", CofferFrame:GetHeight(), 320)
+check("panel height computed without GetTop/GetBottom", CofferFrame:GetHeight(), 340)
 check("addon compartment entry registered", compartment and compartment.text, "Coffer")
 Coffer:ClearRuns()
 flush()
@@ -455,8 +510,8 @@ fire("QUEST_TURNED_IN", 1235, 500, SECRET)
 check("secret quest reward skipped", Coffer.db.session.quest, 5000)
 fire("MERCHANT_SHOW")
 setMoney(money + 1000)
-check("vendor sale recorded", Coffer.db.session.vendor, 1000)
-check("...but not counted as income", Coffer:GetSessionEarned(), 12617 + 5000)
+check("vendor sale counted as sold", Coffer:GetSessionSold(), 1000)
+check("...separately from looted and quest gold", Coffer:GetSessionEarned(), 12617 + 5000)
 setMoney(money - 300)
 check("repair counted as spent", Coffer.db.session.spent, 300)
 fire("MERCHANT_CLOSED")
@@ -475,8 +530,8 @@ section("Online time and gold per hour")
 check("no rate in the first minute", Coffer:GetGoldPerHour(), nil)
 advance(1800)
 check("session time counts online time", Coffer:GetSessionDuration(), 1800)
-local income = 12617 + 5000 + 96
-check("income = looted + quest + items", Coffer:GetSessionIncome(), income)
+local income = 12617 + 5000 + 1000 + 96
+check("income = looted + quest + sold + items", Coffer:GetSessionIncome(), income)
 check("gold per hour", math.floor(Coffer:GetGoldPerHour() + 0.5), income * 2)
 check("total = income - spent", Coffer:GetSessionNet(), income - 500)
 Fire("PLAYER_LOGOUT") -- log off...
@@ -510,6 +565,92 @@ fire("MAIL_SHOW") -- and its close event never arrives
 fire("LOOT_OPENED")
 fire("CHAT_MSG_LOOT", "You receive loot: " .. link(4002) .. ".")
 check("a missed close event can't block real loot", Coffer.db.session.items[4002] and Coffer.db.session.items[4002].count, 1)
+
+section("Selling and crafting move value out of Items, never count it twice")
+fire("CHAT_MSG_LOOT", "You receive loot: " .. link(5000) .. "x10.")
+bagAdd(5000, 10)
+fire("BAG_UPDATE_DELAYED")
+check("10 looted, valued at 12c each", Coffer.db.session.items[5000].count * Coffer.db.session.items[5000].value, 120)
+local itemsBefore, soldBefore = Coffer:GetSessionItemsValue(), Coffer:GetSessionSold()
+
+fire("MERCHANT_SHOW")
+bagRemove(5000, 4)
+fire("BAG_UPDATE_DELAYED")
+setMoney(money + 48)
+check("vendor sale: sold items leave the tally", Coffer.db.session.items[5000].count, 6)
+check("...and their sale gold counts", Coffer:GetSessionSold() - soldBefore, 48)
+check("...so income moved, it didn't double", Coffer:GetSessionItemsValue(), itemsBefore - 48)
+fire("MERCHANT_CLOSED")
+bagRemove(5000, 1)
+fire("BAG_UPDATE_DELAYED")
+check("a sale landing just after the vendor closes still counts", Coffer.db.session.items[5000].count, 5)
+
+advance(10)
+fire("BANKFRAME_OPENED")
+bagRemove(5000, 2)
+fire("BAG_UPDATE_DELAYED")
+fire("BANKFRAME_CLOSED")
+check("banking an item doesn't remove it (you still have it)", Coffer.db.session.items[5000].count, 5)
+
+fire("AUCTION_HOUSE_SHOW")
+bagRemove(5000, 3)
+fire("BAG_UPDATE_DELAYED")
+fire("AUCTION_HOUSE_CLOSED")
+check("posting on the AH doesn't remove it (not sold yet)", Coffer.db.session.items[5000].count, 5)
+mails = { { sender = "Auction House", subject = "Auction successful: Item 5000", money = 2000,
+            invoiceType = "seller", itemName = "Item 5000", count = 3 } }
+fire("MAIL_SHOW")
+collectMail(1)
+check("auction sale gold collected from the mailbox counts", Coffer.db.session.ahSales, 2000)
+check("...and those items leave the tally", Coffer.db.session.items[5000].count, 2)
+collectMail(1)
+check("collecting the same mail twice can't count twice", Coffer.db.session.ahSales, 2000)
+fire("MAIL_CLOSED")
+
+mails = { { sender = "Kabannalt", subject = "farm gold", money = 100000 } }
+fire("MAIL_SHOW")
+collectMail(1)
+check("gold mailed by an alt isn't a sale", Coffer.db.session.ahSales, 2000)
+fire("MAIL_CLOSED")
+
+fire("AUCTION_HOUSE_SHOW")
+local spentBeforeBid = Coffer.db.session.spent
+setMoney(money - 1000)
+fire("AUCTION_HOUSE_CLOSED")
+check("a bid counts as spent", Coffer.db.session.spent - spentBeforeBid, 1000)
+mails = { { sender = "Auction House", subject = "Outbid on Item 6000", money = 1000 } }
+fire("MAIL_SHOW")
+collectMail(1)
+fire("MAIL_CLOSED")
+check("...and an outbid refund gives it back", Coffer.db.session.spent, spentBeforeBid)
+
+advance(10)
+fire("CHAT_MSG_LOOT", "You receive loot: " .. link(4305) .. "x10.")
+bagAdd(4305, 10)
+fire("BAG_UPDATE_DELAYED")
+bagRemove(4305, 6) -- materials leave before the "You create" line arrives...
+fire("BAG_UPDATE_DELAYED")
+fire("CHAT_MSG_LOOT", "You create: " .. link(5764) .. ".")
+check("a crafted item counts at its value", (Coffer.db.session.items[5764] or {}).count, 1)
+check("...marked as crafted", (Coffer.db.session.items[5764] or {}).crafted, 1)
+check("looted materials it used leave the tally", Coffer.db.session.items[4305].count, 4)
+advance(10)
+fire("CHAT_MSG_LOOT", "You create: " .. link(5764) .. ".")
+bagRemove(4305, 3) -- ...or after it
+fire("BAG_UPDATE_DELAYED")
+check("materials used just after the line count too", Coffer.db.session.items[4305].count, 1)
+check("two crafted", (Coffer.db.session.items[5764] or {}).count, 2)
+bagAdd(7777, 5)
+fire("BAG_UPDATE_DELAYED")
+advance(10)
+fire("CHAT_MSG_LOOT", "You create: " .. link(5764) .. ".")
+bagRemove(7777, 5)
+fire("BAG_UPDATE_DELAYED")
+check("materials you already had (not looted this session) cost nothing", (Coffer.db.session.items[5764] or {}).count, 3)
+advance(10)
+bagRemove(4305, 1)
+fire("BAG_UPDATE_DELAYED")
+check("using an item outside a craft or vendor keeps it counted", Coffer.db.session.items[4305].count, 1)
 
 section("A dungeon run, with a death and a /reload")
 fire("UNIT_DIED", SECRET)
@@ -693,6 +834,11 @@ flush()
 check("compartment entry reopens it", CofferFrame and CofferFrame:IsShown(), true)
 
 section("Slash commands")
+CofferDB.schema = 2
+CofferDB.session.vendor = 777
+reload()
+check("schema 2 vendor sales (never matched to items) dropped, not double-counted", Coffer.db.session.vendor, 0)
+check("...the rest of the session kept", Coffer.db.session.quest, 5000)
 slash("help")
 slash("debug")
 check("debug window opens", CofferDebugFrame and CofferDebugFrame:IsShown(), true)

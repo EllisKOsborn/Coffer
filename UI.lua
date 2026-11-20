@@ -242,6 +242,9 @@ local function RunTooltip(tip, run)
     local itemsValue = run.itemsValue or Coffer:GetRunItemsValue(run)
     Line(tip, "Looted gold", Coffer:FormatSignedShort(run.loot or 0), COLORS.green)
     Line(tip, "Quest gold", Coffer:FormatSignedShort(run.quest or 0), COLORS.green)
+    if (run.sold or 0) > 0 then
+        Line(tip, "Sold", Coffer:FormatSignedShort(run.sold), COLORS.green)
+    end
     Line(tip, "Items", Coffer:FormatSignedShort(itemsValue), COLORS.green)
     Line(tip, "Spent", Coffer:FormatSignedShort(-(run.spent or 0)), COLORS.red)
     local net = Coffer:GetRunNet(run)
@@ -274,18 +277,19 @@ local function SessionTooltip(tip)
     tip:AddLine(" ")
     Line(tip, "Looted gold", Coffer:FormatSignedShort(s.loot), COLORS.green)
     Line(tip, "Quest gold", Coffer:FormatSignedShort(s.quest), COLORS.green)
-    Line(tip, "Items looted", Coffer:FormatSignedShort(Coffer:GetSessionItemsValue()), COLORS.green)
+    Line(tip, "Sold to vendors", Coffer:FormatSignedShort(s.vendor), COLORS.green)
+    Line(tip, "Sold on the auction house", Coffer:FormatSignedShort(s.ahSales), COLORS.green)
+    Line(tip, "Items you still have", Coffer:FormatSignedShort(Coffer:GetSessionItemsValue()), COLORS.green)
     Line(tip, "Spent", Coffer:FormatSignedShort(-s.spent), COLORS.red)
     Line(tip, "Kills", tostring(s.kills))
-    Line(tip, "Sold to vendors", Coffer:FormatShort(s.vendor), COLORS.muted)
     tip:AddLine(" ")
-    tip:AddLine("Vendor sales aren't counted as income: those items were already counted at their value when looted.", 0.55, 0.55, 0.55, true)
+    tip:AddLine("Items you loot or craft count at their value until you sell them or craft with them - then the sale gold, or what you crafted, counts instead. Nothing is counted twice.", 0.55, 0.55, 0.55, true)
     tip:AddLine("Right-click to start a new session.", 0.55, 0.55, 0.55)
 end
 
 local function GphTooltip(tip)
     tip:AddLine("Gold per hour", COLORS.gold[1], COLORS.gold[2], COLORS.gold[3])
-    tip:AddLine("(looted gold + quest gold + item value) / online time", 0.75, 0.75, 0.75, true)
+    tip:AddLine("(looted + quest gold + sales + value of items you still have) / online time", 0.75, 0.75, 0.75, true)
     tip:AddLine(" ")
     local valuation = Coffer.db.settings.valuation
     tip:AddLine(valuation == "auction"
@@ -450,13 +454,14 @@ local function LayoutSession()
     local s = sections.session
     Place(s.header, 12, ROW_HEIGHT)
     s.summary:SetText(Coffer:FormatDuration(Coffer:GetSessionDuration()))
-    local sessionRows = { rows.earned, rows.items, rows.spent, rows.total }
+    local sessionRows = { rows.earned, rows.sold, rows.items, rows.spent, rows.total }
     if s.collapsed then
         for _, row in ipairs(sessionRows) do row:Hide() end
         return
     end
     local values = {
         Coffer:GetSessionEarned(),
+        Coffer:GetSessionSold(),
         Coffer:GetSessionItemsValue(),
         -Coffer.db.session.spent,
         Coffer:GetSessionNet(),
@@ -501,7 +506,13 @@ local function LayoutItems()
             end
             tip:AddLine(" ")
             local each = data.entry.value or 0
-            tip:AddDoubleLine("Looted this session", tostring(data.entry.count), 0.75, 0.75, 0.75, 1, 1, 1)
+            local crafted = data.entry.crafted or 0
+            if crafted > 0 then
+                tip:AddDoubleLine("Crafted this session", tostring(crafted), 0.75, 0.75, 0.75, 1, 1, 1)
+            end
+            if data.entry.count > crafted then
+                tip:AddDoubleLine("Looted this session", tostring(data.entry.count - crafted), 0.75, 0.75, 0.75, 1, 1, 1)
+            end
             tip:AddDoubleLine("Value each (" .. (data.entry.source or "?") .. ")", Coffer:FormatMoney(each), 0.75, 0.75, 0.75, 1, 1, 1)
             tip:AddLine("Shift-click to link in chat", 0.55, 0.55, 0.55)
             tip:AddLine("Right-click to stop counting it (e.g. it wasn't loot)", 0.55, 0.55, 0.55)
@@ -512,7 +523,7 @@ local function LayoutItems()
 
     local note = rows.itemsNote
     if #list == 0 then
-        note.text:SetText("Nothing looted yet this session")
+        note.text:SetText("Nothing looted or crafted yet this session")
         Place(note, 2, 14, 20)
     elseif #list > MAX_ITEMS then
         note.text:SetText(showAllItems and "show fewer" or ("and %d more"):format(#list - shown))
@@ -754,10 +765,11 @@ local function BuildFrame()
         Confirm("COFFER_RESET_SESSION", "Start a new Coffer session? Run history is kept.", function() Coffer:ResetSession() end)
     end
     rows.earned = LabelRow("Earned")
+    rows.sold = LabelRow("Sold")
     rows.items = LabelRow("Items")
     rows.spent = LabelRow("Spent")
     rows.total = LabelRow("Total")
-    for _, key in ipairs({ "earned", "items", "spent", "total" }) do
+    for _, key in ipairs({ "earned", "sold", "items", "spent", "total" }) do
         Hoverable(rows[key], SessionTooltip)
     end
 

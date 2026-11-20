@@ -318,6 +318,18 @@ end
 -- List rows (items, runs)
 -- ---------------------------------------------------------------------------
 
+local function Confirm(key, text, onAccept)
+    if StaticPopupDialogs and StaticPopup_Show then
+        StaticPopupDialogs[key] = {
+            text = text, button1 = YES or "Yes", button2 = NO or "No",
+            OnAccept = onAccept, timeout = 0, whileDead = true, hideOnEscape = true,
+        }
+        StaticPopup_Show(key)
+    else
+        onAccept()
+    end
+end
+
 local function ListRow(pool, index, withIcon)
     local row = pool[index]
     if row then return row end
@@ -344,9 +356,17 @@ local function ListRow(pool, index, withIcon)
         if self.tooltip then ShowTooltip(self, self.tooltip) end
     end)
     row:SetScript("OnLeave", HideTooltip)
-    row:SetScript("OnClick", function(self)
-        -- shift-click an item to link it in chat, like anywhere else in the UI
-        if self.link and IsShiftKeyDown and IsShiftKeyDown() and ChatEdit_InsertLink then
+    row:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+    row:SetScript("OnClick", function(self, button)
+        if not self.itemID then return end
+        if button == "RightButton" then
+            local itemID = self.itemID
+            local name = Coffer.GetItemInfo(itemID) or "this item"
+            Confirm("COFFER_FORGET_ITEM", ("Stop counting %s this session?"):format(name), function()
+                Coffer:ForgetItem(itemID)
+            end)
+        elseif self.link and IsShiftKeyDown and IsShiftKeyDown() and ChatEdit_InsertLink then
+            -- shift-click links the item in chat, like anywhere else in the UI
             ChatEdit_InsertLink(self.link)
         end
     end)
@@ -484,6 +504,7 @@ local function LayoutItems()
             tip:AddDoubleLine("Looted this session", tostring(data.entry.count), 0.75, 0.75, 0.75, 1, 1, 1)
             tip:AddDoubleLine("Value each (" .. (data.entry.source or "?") .. ")", Coffer:FormatMoney(each), 0.75, 0.75, 0.75, 1, 1, 1)
             tip:AddLine("Shift-click to link in chat", 0.55, 0.55, 0.55)
+            tip:AddLine("Right-click to stop counting it (e.g. it wasn't loot)", 0.55, 0.55, 0.55)
         end
         Place(row, 2, ROW_HEIGHT)
     end
@@ -559,18 +580,6 @@ end
 -- ---------------------------------------------------------------------------
 
 local menu
-
-local function Confirm(key, text, onAccept)
-    if StaticPopupDialogs and StaticPopup_Show then
-        StaticPopupDialogs[key] = {
-            text = text, button1 = YES or "Yes", button2 = NO or "No",
-            OnAccept = onAccept, timeout = 0, whileDead = true, hideOnEscape = true,
-        }
-        StaticPopup_Show(key)
-    else
-        onAccept()
-    end
-end
 
 local function MenuEntries()
     local settings = Coffer.db.settings

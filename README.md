@@ -62,6 +62,7 @@ Forever has its **own** install folder, `_forever_`. Addons in `_retail_` or
 - Gear icon: lock the panel, switch item valuation, re-price items, start a new
   session, clear run history.
 - Right-click **THIS SESSION**: start a new session (run history is kept).
+- Right-click an item to stop counting it, if something that wasn't loot got in.
 - Click a section header to collapse it. Coffer remembers which sections you
   collapsed and whether the panel is shown.
 - `/coffer help` lists the commands: `reset`, `lock`, `unlock`,
@@ -80,8 +81,12 @@ changes in your gold:
 - **Your loot** is matched against Blizzard's localized `LOOT_ITEM_SELF` templates.
   Other players' loot uses a different template ("X receives loot"), so it can never
   be counted as yours, and Forever's two-part character names don't matter.
-- **Spending** is any drop in your gold, except gold mailed or traded away, which
-  isn't spending.
+- **Items you buy aren't loot.** The game announces auction house purchases
+  (collected from the mailbox), vendor purchases, trades and bank withdrawals with the
+  same "You receive item: ..." line it uses for quest rewards. Coffer ignores items
+  that arrive while one of those windows is open.
+- **Spending** is any drop in your gold, including auction house and vendor purchases,
+  except gold mailed or traded away, which isn't spending.
 - **Vendor sales are not income.** A looted item's value was already counted when you
   looted it, so selling it would count it twice. Sales are still shown in the session
   tooltip.
@@ -109,7 +114,7 @@ against a mock of Forever's client. The mock is strict where the real client is:
 - calling a widget method that doesn't exist is an error
 - if Coffer reports any error through its own error handling, the run fails
 
-On top of that it plays a full farming session and makes 95 checks on the numbers,
+On top of that it plays a full farming session and makes 102 checks on the numbers,
 including `/reload`s, logout and login with saved data carried over, and a death
 mid-dungeon.
 

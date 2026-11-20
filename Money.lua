@@ -119,14 +119,36 @@ end
 Track("MERCHANT_SHOW", "MERCHANT_CLOSED", "merchant")
 Track("MAIL_SHOW", "MAIL_CLOSED", "mail")
 Track("TRADE_SHOW", "TRADE_CLOSED", "trade")
+Track("AUCTION_HOUSE_SHOW", "AUCTION_HOUSE_CLOSED", "auction")
+Track("BANKFRAME_OPENED", "BANKFRAME_CLOSED", "bank")
+Track("GUILDBANKFRAME_OPENED", "GUILDBANKFRAME_CLOSED", "guildbank")
 
 local interactionKinds = {}
 local PIT = Enum and Enum.PlayerInteractionType
 if PIT then
-    if PIT.Merchant then interactionKinds[PIT.Merchant] = "merchant" end
-    if PIT.MailInfo then interactionKinds[PIT.MailInfo] = "mail" end
-    if PIT.TradePartner then interactionKinds[PIT.TradePartner] = "trade" end
+    for enumName, kind in pairs({
+        Merchant = "merchant", MailInfo = "mail", TradePartner = "trade",
+        Auctioneer = "auction", Banker = "bank", GuildBanker = "guildbank",
+    }) do
+        if PIT[enumName] then interactionKinds[PIT[enumName]] = kind end
+    end
 end
+
+-- Items that turn up while one of these windows is open were bought, collected from the
+-- mailbox (which is where auction house purchases arrive) or traded - not looted, even
+-- though the game announces them with the same "You receive item: ..." line it uses for
+-- quest rewards.
+function Coffer:IsAcquiringNotLooting()
+    return next(open) ~= nil
+end
+
+-- A missed close event must not leave items uncounted indefinitely: opening a loot window
+-- or zoning means those windows aren't open any more.
+local function ClearOpenWindows()
+    wipe(open)
+end
+Coffer:On("LOOT_OPENED", ClearOpenWindows)
+Coffer:On("PLAYER_ENTERING_WORLD", ClearOpenWindows)
 Coffer:On("PLAYER_INTERACTION_MANAGER_FRAME_SHOW", function(_, _, kind)
     if interactionKinds[kind] then open[interactionKinds[kind]] = true end
 end)

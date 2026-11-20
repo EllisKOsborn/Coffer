@@ -250,7 +250,7 @@ end
 _G.ITEM_QUALITY_COLORS = {}
 for q = 0, 7 do ITEM_QUALITY_COLORS[q] = { r = 1, g = 1, b = 1 } end
 _G.C_AddOns = { GetAddOnMetadata = function() return "0.0.0-test" end }
-_G.Enum = { PlayerInteractionType = { TradePartner = 1, Merchant = 5, MailInfo = 17 } }
+_G.Enum = { PlayerInteractionType = { TradePartner = 1, Merchant = 5, Banker = 8, GuildBanker = 10, MailInfo = 17, Auctioneer = 21 } }
 _G.UISpecialFrames = {}
 _G.StaticPopupDialogs = {}
 _G.StaticPopup_Show = function(key) StaticPopupDialogs[key].OnAccept() end -- auto-confirm
@@ -488,6 +488,29 @@ tick()
 check("panel refresh ticker is running (live durations)", (FindText(CofferFrame, "Gold per hour") ~= nil) and #tickers >= 2, true)
 check("session totals survive a relog", Coffer.db.session.quest, 5000)
 
+section("Purchases aren't loot")
+fire("AUCTION_HOUSE_SHOW")
+local spentBefore = Coffer.db.session.spent
+setMoney(money - 490000)
+check("auction house purchase counted as spent", Coffer.db.session.spent - spentBefore, 490000)
+fire("AUCTION_HOUSE_CLOSED")
+fire("PLAYER_INTERACTION_MANAGER_FRAME_SHOW", Enum.PlayerInteractionType.MailInfo)
+fire("CHAT_MSG_LOOT", "You receive item: " .. link(4000) .. ".")
+check("item collected from the mailbox (AH purchase) isn't loot", Coffer.db.session.items[4000], nil)
+fire("PLAYER_INTERACTION_MANAGER_FRAME_HIDE", Enum.PlayerInteractionType.MailInfo)
+fire("MERCHANT_SHOW")
+fire("CHAT_MSG_LOOT", "You receive item: " .. link(4001) .. "x5.")
+check("item bought from a vendor isn't loot", Coffer.db.session.items[4001], nil)
+fire("MERCHANT_CLOSED")
+fire("PLAYER_INTERACTION_MANAGER_FRAME_SHOW", Enum.PlayerInteractionType.Auctioneer)
+fire("CHAT_MSG_LOOT", "You receive item: " .. link(4003) .. ".")
+check("item received at the auction house isn't loot", Coffer.db.session.items[4003], nil)
+fire("PLAYER_INTERACTION_MANAGER_FRAME_HIDE", Enum.PlayerInteractionType.Auctioneer)
+fire("MAIL_SHOW") -- and its close event never arrives
+fire("LOOT_OPENED")
+fire("CHAT_MSG_LOOT", "You receive loot: " .. link(4002) .. ".")
+check("a missed close event can't block real loot", Coffer.db.session.items[4002] and Coffer.db.session.items[4002].count, 1)
+
 section("A dungeon run, with a death and a /reload")
 fire("UNIT_DIED", SECRET)
 check("open-world deaths aren't counted (can't tell whose kill)", Coffer.db.session.kills, 0)
@@ -609,6 +632,19 @@ shift = true
 Click(itemRow)
 shift = false
 check("shift-click links the item in chat", insertedLink and insertedLink:find("item:2589", 1, true) ~= nil, true)
+
+local function findRow(widget, itemID)
+    for _, child in ipairs(widget.children) do
+        if child.itemID == itemID and child:IsShown() then return child end
+        local found = findRow(child, itemID)
+        if found then return found end
+    end
+end
+local robeRow = findRow(CofferFrame, 4002)
+check("row for the item to forget", robeRow ~= nil, true)
+Click(robeRow, "RightButton")
+flush()
+check("right-click stops counting an item", Coffer.db.session.items[4002], nil)
 
 local runsHeader = FindText(CofferFrame, "RECENT RUNS")
 check("runs header found", runsHeader ~= nil, true)

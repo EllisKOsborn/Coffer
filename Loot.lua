@@ -58,8 +58,20 @@ end
 
 Coffer:On("CHAT_MSG_LOOT", function(self, _, message)
     if not self.db or not self:Readable(message) or type(message) ~= "string" then return end
+    if self:IsAcquiringNotLooting() then return end -- bought, mailed, traded: not loot
     local itemID, count, link = self:ParseOwnLoot(message)
     if itemID then
         self:RecordItemLoot(itemID, count, link)
     end
 end)
+
+-- Stop counting an item this session (and in the run in progress): the manual fix for
+-- anything that slipped through as loot when it wasn't.
+function Coffer:ForgetItem(itemID)
+    self.db.session.items[itemID] = nil
+    local run = self:GetActiveRun()
+    if run then
+        run.items[itemID] = nil
+    end
+    self:Changed()
+end

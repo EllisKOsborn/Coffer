@@ -1,7 +1,7 @@
 ## Interface: 16001
 ## Title: |cffffd200Coffer|r
 ## Notes: Gold-per-hour, loot and dungeon-run tracker for World of Warcraft: Forever, with instance lockout tracking.
-## Version: 0.5.0
+## Version: 0.5.1
 ## SavedVariablesPerCharacter: CofferDB
 ## SavedVariables: CofferAccountDB
 ## IconTexture: Interface\Icons\INV_Misc_Coin_01
